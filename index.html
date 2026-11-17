@@ -561,7 +561,7 @@ async function renderPdfPage(n){
     const base = page.getViewport({ scale: 1 });
     const cssW = P.wrap.clientWidth || Math.min($('#rBody').clientWidth - 14, 920);
     const scale = cssW / base.width;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
     const vp = page.getViewport({ scale: scale * dpr });
     P.pdfCv.width = vp.width; P.pdfCv.height = vp.height;
     P.annoCv.width = vp.width; P.annoCv.height = vp.height;
