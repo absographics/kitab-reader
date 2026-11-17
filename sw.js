@@ -1,4 +1,4 @@
-const CACHE = 'kitab-reader-v13';
+const CACHE = 'kitab-reader-v15';
 
 const SHELL = [
   './',
@@ -49,6 +49,9 @@ self.addEventListener('activate', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  /* phone.local is the Android app's private file bridge — the native shell
+     serves those bytes itself. Never cache them, never fall back for them. */
+  try { if (new URL(e.request.url).host === 'phone.local') return; } catch (err) {}
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then((hit) => {
       if (hit) return hit;

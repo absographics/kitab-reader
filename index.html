@@ -152,6 +152,11 @@ body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
     <button class="iconbtn" id="searchBtn" aria-label="Search">🔍</button>
     <button class="iconbtn" id="libMenuBtn" aria-label="More">⋮</button>
   </div>
+  <div id="phoneBar" class="hidden" style="margin:10px 14px 0;background:#fdf3e3;border:1px solid #e8cf9f;color:#5c4510;border-radius:14px;padding:12px 14px;font-size:14px;line-height:1.5;">
+    <b>Your phone's books can come here by themselves.</b><br>
+    Kitab Reader needs one permission to see the PDF, EPUB and TXT files on this phone. After that, every book on the phone — and every new one — appears in this library on its own.
+    <button id="phoneAllow" style="display:block;margin-top:10px;width:100%;padding:12px;background:#0b5340;color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:bold;">Allow access</button>
+  </div>
   <div id="searchRow"><input id="searchInput" type="search" placeholder="Search books…"></div>
   <div id="libScroll">
     <div id="continueSec"></div>
@@ -265,17 +270,18 @@ const DB = {
    versions, so nothing already in the library is lost. */
 const FS = {
   ok: !!(navigator.storage && navigator.storage.getDirectory),
-  async save(id, file){
+  async save(id, file){ await FS.saveStream(id, file.size, file.stream()); },
+  async saveStream(id, size, stream){
     const root = await navigator.storage.getDirectory();
     const fh = await root.getFileHandle(id, { create: true });
     const w = await fh.createWritable();
     try {
-      const reader = file.stream().getReader();
+      const reader = stream.getReader();
       for (;;) { const { done, value } = await reader.read(); if (done) break; await w.write(value); }
       await w.close();
     } catch (e) { try { await w.abort(); } catch (_) {} throw e; }
     const saved = await fh.getFile();
-    if (saved.size !== file.size) throw new Error('Saved file is incomplete');
+    if (saved.size !== size) throw new Error('Saved file is incomplete');
   },
   async get(id){
     if (!FS.ok) return null;
@@ -294,6 +300,11 @@ async function saveBookFile(id, file){
   if (FS.ok) { await FS.save(id, file); return; }
   await DB.put('files', { id, blob: file });
 }
+async function saveBookStream(id, size, stream){
+  if (FS.ok) { await FS.saveStream(id, size, stream); return; }
+  const blob = await new Response(stream).blob();
+  await DB.put('files', { id, blob });
+}
 async function getBookBlob(id){
   const f = await FS.get(id);
   if (f) return f;
@@ -303,7 +314,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '1.6';
+const APP_VERSION = '1.7';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -429,7 +440,7 @@ $('#scrim').addEventListener('click', closeDrawer);
 function viewBooks(){
   let list = S.books.slice();
   const v = S.view;
-  if (v === 'reading') list = list.filter(b => b.progress && b.progress.pct > 0.5 && b.progress.pct < 99.5);
+  if (v === 'reading') list = list.filter(b => b.lastReadAt > 0 && (!b.progress || b.progress.pct < 99.5));
   else if (v === 'fav') list = list.filter(b => b.fav);
   else if (v === 'toread') list = list.filter(b => b.toRead);
   else if (v === 'haveread') list = list.filter(b => b.haveRead);
@@ -455,7 +466,7 @@ function coverHTML(b){
 function renderLibrary(){
   renderDrawer();
   $('#libTitle').textContent = viewTitle();
-  const cont = S.books.filter(b => b.progress && b.progress.pct > 0.5 && b.progress.pct < 99.5)
+  const cont = S.books.filter(b => b.lastReadAt > 0 && (!b.progress || b.progress.pct < 99.5))
     .sort((a,b) => (b.lastReadAt||0) - (a.lastReadAt||0)).slice(0, 3);
   $('#continueSec').innerHTML = (S.view === 'all' && !S.query && cont.length) ?
     '<div class="secTitle">Continue reading</div>' + cont.map(b => `
@@ -600,6 +611,78 @@ async function addBookFile(f){
   await DB.put('books', rec);
   return 'ok';
 }
+/* ---------------- Phone sync (Android app only) ----------------
+   Inside the Kitab Reader Android app, the phone itself hands us every book
+   file: the shell scans the whole device and streams new files in over
+   https://phone.local, so the library fills itself — no Add button, no
+   picking. The shell also calls KitabPhoneSync() again whenever a new book
+   file appears anywhere on the phone. On the plain website none of this
+   exists and nothing here runs. */
+const NATIVE = !!(window.KitabNative && window.KitabNative.scan && window.KitabNative.hasAccess);
+function phoneStream(uri, size){
+  /* The byte range travels in the URL, not a Range header — a plain GET
+     keeps the request CORS-simple, so no preflight can ever block it. */
+  const CH = 8 * 1024 * 1024;
+  let pos = 0;
+  return new ReadableStream({
+    async pull(ctrl){
+      if (pos >= size) { ctrl.close(); return; }
+      const end = Math.min(pos + CH, size) - 1;
+      const res = await fetch('https://phone.local/f?u=' + encodeURIComponent(uri) + '&s=' + pos + '&e=' + end);
+      if (!res.ok && res.status !== 206) throw new Error('Phone file read failed (' + res.status + ')');
+      const buf = await res.arrayBuffer();
+      if (!buf.byteLength) throw new Error('Phone file read failed (empty chunk)');
+      pos += buf.byteLength;
+      ctrl.enqueue(new Uint8Array(buf));
+    }
+  });
+}
+async function addPhoneBook(item){
+  const format = item.mime === 'application/pdf' ? 'pdf'
+    : item.mime === 'application/epub+zip' ? 'epub'
+    : item.mime === 'text/plain' ? 'txt' : fmtOf(item.name);
+  if (!['pdf', 'epub', 'txt'].includes(format)) return 'skip';
+  const id = bookIdFor(item.name, item.size);
+  if (S.books.find(b => b.id === id)) return 'dup';
+  await saveBookStream(id, item.size, phoneStream(item.uri, item.size));
+  const rec = { id, name: item.name, title: item.name.replace(/\.[^.]+$/, ''), author: '', format,
+    size: item.size, addedAt: Date.now(), lastReadAt: 0, progress: null, totalPages: 0,
+    fav: false, toRead: false, haveRead: false, collection: null, cover: null, metaDone: false };
+  S.books.push(rec);
+  await DB.put('books', rec);
+  return 'ok';
+}
+window.KitabPhoneSync = async function(){
+  if (!NATIVE || S.phoneSyncing) return;
+  const bar = $('#phoneBar');
+  if (!window.KitabNative.hasAccess()) { if (bar) bar.classList.remove('hidden'); return; }
+  if (bar) bar.classList.add('hidden');
+  S.phoneSyncing = true;
+  try {
+    let items = [];
+    try { items = JSON.parse(window.KitabNative.scan() || '[]'); } catch (e) { items = []; }
+    const fresh = items.filter(it => it && it.name && it.size > 0 &&
+      !S.books.find(b => b.id === bookIdFor(it.name, it.size)));
+    if (fresh.length) toast('Bringing ' + fresh.length + ' new book' + (fresh.length === 1 ? '' : 's') + ' from your phone…', 5000);
+    let added = 0;
+    for (const it of fresh) {
+      try { if (await addPhoneBook(it) === 'ok') added++; }
+      catch (e) { console.warn('phone add failed', it.name, e); }
+    }
+    if (added) {
+      renderLibrary();
+      toast(added === 1 ? '1 new book arrived in your library' : added + ' new books arrived in your library', 4500);
+    }
+  } finally { S.phoneSyncing = false; }
+};
+if (NATIVE) {
+  const fabEl = $('#fab'); if (fabEl) fabEl.style.display = 'none';
+  const emptyEl = $('#libEmpty');
+  if (emptyEl) emptyEl.innerHTML = 'No books yet.<br>Books on this phone will appear here on their own.';
+  window.addEventListener('load', () => setTimeout(() => window.KitabPhoneSync(), 1200));
+}
+{ const pa = $('#phoneAllow'); if (pa) pa.addEventListener('click', () => { if (window.KitabNative) window.KitabNative.requestAccess(); }); }
+
 /* fill in title/author/cover once, when the book is first opened */
 async function enrichPdfMeta(b){
   if (b.metaDone || !S.pdf) return;
