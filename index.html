@@ -518,6 +518,7 @@ async function openBook(id){
   $('#rTitle').textContent = b.title;
   $('#library').classList.add('hidden');
   $('#reader').classList.add('open');
+  try { history.pushState({ kr: 'reader' }, ''); } catch (e) {}
   $('#pdfPages').classList.add('hidden'); $('#epubHost').classList.add('hidden'); $('#txtHost').classList.add('hidden');
   $('#rAnnotate').classList.toggle('hidden', b.format !== 'pdf');
   setAnnoMode(false);
@@ -539,7 +540,12 @@ function closeBook(){
   $('#library').classList.remove('hidden');
   renderLibrary();
 }
-$('#rBack').addEventListener('click', closeBook);
+$('#rBack').addEventListener('click', () => {
+  closeBook();
+  /* keep the history stack in sync: drop the reader entry without reacting to it */
+  suppressPop = true; try { history.back(); } catch (e) { suppressPop = false; }
+  setTimeout(() => { suppressPop = false; }, 350);
+});
 
 function saveProgress(){
   const b = S.cur; if (!b || S.loading) return;
@@ -1091,11 +1097,29 @@ window.addEventListener('resize', () => {
   clearTimeout(resizeT);
   resizeT = setTimeout(() => { if (S.cur && S.cur.format === 'pdf') layoutPdfPages(); }, 250);
 });
+/* ---------------- Phone back button ----------------
+   Back closes the sheet, then the drawer, then the book.
+   On the home screen, back twice in a row exits the app. */
+let suppressPop = false;
+let lastRootBack = 0;
+window.addEventListener('popstate', () => {
+  if (suppressPop) { suppressPop = false; return; }
+  if ($('#sheetWrap').classList.contains('open')) { closeSheet(); try { history.pushState({ kr: 'here' }, ''); } catch (e) {} return; }
+  if ($('#drawer').classList.contains('open')) { closeDrawer(); try { history.pushState({ kr: 'here' }, ''); } catch (e) {} return; }
+  if ($('#reader').classList.contains('open')) { closeBook(); return; }
+  const now = Date.now();
+  if (now - lastRootBack < 2000) { try { history.back(); } catch (e) {} return; }
+  lastRootBack = now;
+  toast('Press back again to exit');
+  try { history.pushState({ kr: 'root' }, ''); } catch (e) {}
+});
+
 (async function init(){
   try { await DB.open(); } catch (e) { toast('Storage khul nahi paya'); return; }
   S.books = await DB.all('books');
   applyTheme();
   renderLibrary();
+  try { history.pushState({ kr: 'root' }, ''); } catch (e) {}
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
 </script>
