@@ -156,7 +156,7 @@ body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
     <div class="emptyMsg hidden" id="libEmpty">No books yet.<br>Tap the <b>+</b> button and add your PDF, EPUB or TXT books.<br>They stay on your phone — nothing is uploaded.</div>
   </div>
   <button id="fab" aria-label="Add books">+</button>
-  <input type="file" id="fileInput" accept=".pdf,.epub,.txt" multiple class="hidden">
+  <input type="file" id="fileInput" accept=".pdf,.epub,.txt,application/pdf,application/epub+zip,text/plain" multiple class="hidden">
 </div>
 
 <!-- drawer -->
@@ -299,7 +299,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '1.4';
+const APP_VERSION = '1.5';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -498,8 +498,21 @@ $('#fileInput').addEventListener('change', async (e) => {
     toast(ok === 1 ? 'Book added to your library' : ok + ' books added to your library');
   }
 });
+/* Format by name first; if the name has no usable extension (common for
+   files forwarded through chat apps), sniff the actual bytes instead. */
+async function detectFormat(f){
+  const byName = fmtOf(f.name);
+  if (['pdf','epub','txt'].includes(byName)) return byName;
+  try {
+    const head = new Uint8Array(await f.slice(0, 8).arrayBuffer());
+    const s = String.fromCharCode.apply(null, Array.from(head));
+    if (s.indexOf('%PDF-') === 0) return 'pdf';
+    if (head[0] === 0x50 && head[1] === 0x4B) return 'epub'; // ZIP container = EPUB
+  } catch (e) {}
+  return byName;
+}
 async function addBookFile(f){
-  const format = fmtOf(f.name);
+  const format = await detectFormat(f);
   if (!['pdf','epub','txt'].includes(format)) { toast('Not supported yet: ' + f.name); return 'skip'; }
   const id = bookIdFor(f.name, f.size);
   const existing = S.books.find(b => b.id === id);
