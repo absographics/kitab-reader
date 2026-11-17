@@ -1,10 +1,12 @@
-const CACHE = 'kitab-reader-v17';
+const CACHE = 'kitab-reader-v19';
 
 const SHELL = [
   './',
   './index.html',
   './install.html',
   './drive-auth.html',
+  './drive-pick.html',
+  './privacy.html',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
@@ -53,6 +55,10 @@ self.addEventListener('fetch', (e) => {
   /* phone.local is the Android app's private file bridge — the native shell
      serves those bytes itself. Never cache them, never fall back for them. */
   try { if (new URL(e.request.url).host === 'phone.local') return; } catch (err) {}
+  /* Cross-origin traffic (Google Drive API) is never cached and never falls
+     back to the app shell: a cached Drive file list would hide new books
+     forever, and book downloads would be stored twice. Straight through. */
+  try { if (new URL(e.request.url).origin !== self.location.origin) return; } catch (err) {}
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then((hit) => {
       if (hit) return hit;

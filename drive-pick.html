@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kitab Reader — Pick books from Drive</title>
+<style>
+  body{margin:0;font-family:system-ui,sans-serif;background:#0b3b39;color:#f5efe0;text-align:center;padding:56px 24px;}
+  .big{font-size:44px;}
+  p{font-size:17px;line-height:1.5;}
+</style>
+</head>
+<body>
+<div class="big">📚</div>
+<p id="msg">Opening your Google Drive… pick the books you want in Kitab Reader.</p>
+<script src="https://apis.google.com/js/api.js"></script>
+<script>
+(function(){
+  var CLIENT_ID = '996082725167-kbfnngk5j7h21o41agkufsm5frsb4nge.apps.googleusercontent.com';
+  var API_KEY = 'AIzaSyCopaBbNy6gj4ZflQf_ZYCU5LtQAg7nQXg';
+  var APP_ID = '996082725167';
+  var frag = new URLSearchParams(location.hash.slice(1));
+  var query = new URLSearchParams(location.search);
+  var token = frag.get('access_token');
+  var state = query.get('state') || frag.get('state') || 'web';
+  var msg = document.getElementById('msg');
+  if (!token) {
+    location.href = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + encodeURIComponent(CLIENT_ID)
+      + '&redirect_uri=' + encodeURIComponent(location.origin + '/drive-pick.html')
+      + '&response_type=token&scope=' + encodeURIComponent('https://www.googleapis.com/auth/drive.file')
+      + '&state=' + state + '&prompt=consent';
+    return;
+  }
+  try { history.replaceState(null, '', location.pathname + '?state=' + state); } catch (e) {}
+  function buildPicker(){
+    try {
+      var view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+        .setMimeTypes('application/pdf,application/epub+zip,text/plain')
+        .setMode(google.picker.DocsViewMode.LIST);
+      var picker = new google.picker.PickerBuilder()
+        .setAppId(APP_ID)
+        .setOAuthToken(token)
+        .setDeveloperKey(API_KEY)
+        .addView(view)
+        .enableFeature(google.picker.Feature.MULTISELECT_ENABLED)
+        .setCallback(onPick)
+        .build();
+      picker.setVisible(true);
+    } catch (e) {
+      msg.textContent = 'The Drive picker could not open. Please try again from the app.';
+    }
+  }
+  function onPick(data){
+    if (data.action === google.picker.Action.PICKED) {
+      var ids = (data.docs || []).map(function(d){ return d.id; }).join(',');
+      if (!ids) { msg.textContent = 'Nothing was picked. You can close this tab.'; return; }
+      msg.textContent = 'Sending your books to Kitab Reader…';
+      if (state === 'app') {
+        location.href = 'kitabreader://oauth#access_token=' + encodeURIComponent(token) + '&ids=' + encodeURIComponent(ids);
+      } else {
+        try { localStorage.setItem('kitab_pick', JSON.stringify({ t: token, ids: ids, exp: Date.now() + 50 * 60000 })); } catch (e) {}
+        location.replace('/');
+      }
+    } else if (data.action === google.picker.Action.CANCEL) {
+      msg.textContent = 'Nothing picked. You can close this tab and return to the app.';
+    }
+  }
+  if (window.gapi) gapi.load('picker', buildPicker);
+  else msg.textContent = 'Could not load Google services. Check your connection and try again.';
+})();
+</script>
+</body>
+</html>
