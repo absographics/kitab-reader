@@ -571,10 +571,20 @@ async function openPdf(buf){
     host.appendChild(wrap);
     const num = document.createElement('div'); num.className = 'pgNum'; num.textContent = n + ' / ' + S.pdf.numPages;
     host.appendChild(num);
-    S.pageEls[n] = { wrap, pdfCv: wrap.querySelector('.pdfCv'), annoCv: wrap.querySelector('.annoCv'), rendered: false };
+    S.pageEls[n] = { wrap, pdfCv: wrap.querySelector('.pdfCv'), annoCv: wrap.querySelector('.annoCv'), rendered: false, aspect: 0 };
   }
+  try {
+    const p1 = await S.pdf.getPage(1);
+    const v1 = p1.getViewport({ scale: 1 });
+    S.pageAspect = v1.height / v1.width;
+    Object.values(S.pageEls).forEach(p => { p.aspect = S.pageAspect; });
+  } catch (e) { S.pageAspect = 1.414; }
   const io = new IntersectionObserver((entries) => {
-    entries.forEach(en => { if (en.isIntersecting) renderPdfPage(+en.target.dataset.page); });
+    entries.forEach(en => {
+      if (!en.isIntersecting) return;
+      const n = +en.target.dataset.page;
+      if (Math.abs(n - S.curPage) <= 6) renderPdfPage(n);
+    });
   }, { root: $('#rBody'), rootMargin: '600px 0px' });
   Object.values(S.pageEls).forEach(p => io.observe(p.wrap));
   S._io = io;
@@ -588,25 +598,52 @@ async function openPdf(buf){
 function layoutPdfPages(){
   if (!S.pdf) return;
   const w = Math.min($('#rBody').clientWidth - 14, 920) * S.pdfScale;
-  Object.values(S.pageEls).forEach(p => { p.wrap.style.width = w + 'px'; });
+  Object.values(S.pageEls).forEach(p => {
+    p.wrap.style.width = w + 'px';
+    if (p.aspect) p.wrap.style.height = (w * p.aspect) + 'px';
+  });
   Object.keys(S.pageEls).forEach(n => { if (S.pageEls[n].rendered) { S.pageEls[n].rendered = false; renderPdfPage(+n); } });
+}
+/* Release a far-away page's bitmaps so a long book never fills the phone's memory.
+   The wrap keeps its exact height, so scrolling never jumps. */
+function freePage(n){
+  const P = S.pageEls[n]; if (!P || !P.rendered) return;
+  P.renderId = (P.renderId || 0) + 1; // cancels any render still in flight for this page
+  if (P.aspect && P.wrap.clientWidth) P.wrap.style.height = (P.wrap.clientWidth * P.aspect) + 'px';
+  P.pdfCv.width = 1; P.pdfCv.height = 1;
+  P.annoCv.width = 1; P.annoCv.height = 1;
+  P.rendered = false;
+}
+function prunePages(){
+  if (!S.pdf) return;
+  for (let n = 1; n <= S.pdf.numPages; n++) {
+    if (Math.abs(n - S.curPage) > 3) freePage(n);
+  }
 }
 async function renderPdfPage(n){
   const P = S.pageEls[n]; if (!P || P.rendered || !S.pdf) return;
   P.rendered = true;
+  const rid = (P.renderId = (P.renderId || 0) + 1);
   try {
     const page = await S.pdf.getPage(n);
+    if (P.renderId !== rid) return; // freed while loading — stay freed
     const base = page.getViewport({ scale: 1 });
+    P.aspect = base.height / base.width;
     const cssW = P.wrap.clientWidth || Math.min($('#rBody').clientWidth - 14, 920);
+    P.wrap.style.height = (cssW * P.aspect) + 'px';
     const scale = cssW / base.width;
     const dpr = Math.min((window.devicePixelRatio || 1) * 1.5, 4);
     const vp = page.getViewport({ scale: scale * dpr });
     P.pdfCv.width = vp.width; P.pdfCv.height = vp.height;
-    P.annoCv.width = vp.width; P.annoCv.height = vp.height;
+    /* annotation layer renders at native screen sharpness — much lighter than the page layer */
+    const aDpr = Math.min(window.devicePixelRatio || 1, 3);
+    P.annoCv.width = Math.round(cssW * aDpr); P.annoCv.height = Math.round(cssW * P.aspect * aDpr);
     await page.render({ canvasContext: P.pdfCv.getContext('2d'), viewport: vp }).promise;
+    if (P.renderId !== rid) { P.pdfCv.width = 1; P.pdfCv.height = 1; P.annoCv.width = 1; P.annoCv.height = 1; return; }
     drawAnnoPage(n);
     drawNoteMarkers(n);
-  } catch (err) { P.rendered = false; console.warn('render', n, err); }
+    prunePages();
+  } catch (err) { if (P.renderId === rid) P.rendered = false; console.warn('render', n, err); }
 }
 function scrollToPage(n, beh = 'smooth'){
   const P = S.pageEls[n]; if (!P) return;
@@ -628,7 +665,10 @@ $('#rBody').addEventListener('scroll', () => {
     for (let n = 1; n <= S.pdf.numPages; n++) {
       const P = S.pageEls[n]; if (P && P.wrap.offsetTop <= mid) cur = n; else if (P && P.wrap.offsetTop > mid) break;
     }
-    if (cur !== S.curPage) { S.curPage = cur; updatePageInfo(); }
+    if (cur !== S.curPage) {
+      S.curPage = cur; updatePageInfo(); prunePages();
+      [cur - 1, cur, cur + 1, cur + 2].forEach(n => { if (S.pageEls[n]) renderPdfPage(n); });
+    }
     clearTimeout(S.saveTimer); S.saveTimer = setTimeout(saveProgress, 600);
   } else if (S.cur.format === 'txt') {
     clearTimeout(S.saveTimer); S.saveTimer = setTimeout(saveProgress, 600);
