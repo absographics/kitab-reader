@@ -255,7 +255,7 @@ const DB = {
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -438,17 +438,41 @@ $('#fab').addEventListener('click', () => $('#fileInput').click());
 $('#fileInput').addEventListener('change', async (e) => {
   const files = Array.from(e.target.files || []); e.target.value = '';
   if (!files.length) return;
-  toast('Adding ' + files.length + ' book(s)…');
-  for (const f of files) { try { await addBookFile(f); } catch (err) { console.warn(err); } }
-  renderLibrary(); toast('Books added to your library');
+  let ok = 0; const failed = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (files.length > 1) toast('Adding ' + (i + 1) + ' of ' + files.length + ': ' + f.name, 4000);
+    try { const r = await addBookFile(f); if (r !== 'skip') ok++; }
+    catch (err) { console.warn('add failed', f.name, err); failed.push({ name: f.name, err }); }
+  }
+  S.books = await DB.all('books');
+  renderLibrary();
+  if (failed.length) {
+    const quota = failed.some(x => x.err && x.err.name === 'QuotaExceededError');
+    toast('Could NOT add ' + failed.length + ' book(s)' + (quota ? ' — phone storage is full' : '') + ': ' + failed[0].name, 6000);
+  } else if (ok) {
+    toast(ok === 1 ? 'Book added to your library' : ok + ' books added to your library');
+  }
 });
 async function addBookFile(f){
   const format = fmtOf(f.name);
-  if (!['pdf','epub','txt'].includes(format)) { toast('Not supported yet: ' + f.name); return; }
+  if (!['pdf','epub','txt'].includes(format)) { toast('Not supported yet: ' + f.name); return 'skip'; }
   const id = bookIdFor(f.name, f.size);
   const existing = S.books.find(b => b.id === id);
-  await DB.put('files', { id, blob: f });
-  if (existing) return; // re-downloaded same book: keep progress & edits (ReadEra-style)
+  /* Space check first: a big book on a nearly-full phone fails deep inside
+     storage with nothing to show for it — catch it here, in plain words. */
+  if (!existing && navigator.storage && navigator.storage.estimate) {
+    let noSpace = false;
+    try {
+      const est = await navigator.storage.estimate();
+      if (est.quota && est.usage !== undefined && f.size > (est.quota - est.usage)) noSpace = true;
+    } catch (e) {}
+    if (noSpace) { const err = new Error('Not enough space on this phone'); err.name = 'QuotaExceededError'; throw err; }
+  }
+  /* One retry: a big write can abort once if the phone is busy, then succeed. */
+  try { await DB.put('files', { id, blob: f }); }
+  catch (e) { await new Promise(r => setTimeout(r, 700)); await DB.put('files', { id, blob: f }); }
+  if (existing) return 'ok'; // re-downloaded same book: keep progress & edits (ReadEra-style)
   const rec = { id, name: f.name, title: f.name.replace(/\.[^.]+$/, ''), author: '', format,
     size: f.size, addedAt: Date.now(), lastReadAt: 0, progress: null, totalPages: 0,
     fav: false, toRead: false, haveRead: false, collection: null, cover: null, metaDone: false };
@@ -456,6 +480,7 @@ async function addBookFile(f){
   // or fail the add. Title/author/cover/pages are filled in on first open.
   S.books.push(rec);
   await DB.put('books', rec);
+  return 'ok';
 }
 /* fill in title/author/cover once, when the book is first opened */
 async function enrichPdfMeta(b){
@@ -861,7 +886,13 @@ function openSettings(){
         <button class="themeBtn ${st.pdfNight ? 'sel':''}" data-pm="night">Night</button>
       </div></div>
     <div class="setRow" style="color:var(--mut);font-size:13px;">Books and edits are stored only on this phone. · App version ${APP_VERSION}</div>
+    <div class="setRow" id="setStorage" style="color:var(--mut);font-size:13px;">Storage: checking…</div>
   `);
+  if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then(est => {
+    const el = $('#setStorage'); if (!el) return;
+    const mb = n => Math.round((n || 0) / 1048576);
+    el.textContent = 'Storage: ' + mb(est.usage) + ' MB used of ' + mb(est.quota) + ' MB available for this app';
+  }).catch(() => {});
   $$('#sheet [data-th]').forEach(b => b.addEventListener('click', () => { S.settings.theme = b.dataset.th; saveSettings(); applyTheme(); openSettings(); }));
   $$('#sheet [data-pm]').forEach(b => b.addEventListener('click', () => {
     S.settings.pdfNight = b.dataset.pm === 'night'; S.settings.pdfSepia = b.dataset.pm === 'sepia';
