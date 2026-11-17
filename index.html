@@ -253,9 +253,53 @@ const DB = {
   del(store, key) { return DB.tx(store, 'readwrite', s => s.delete(key)); }
 };
 
+/* ---- Book file storage -----------------------------------------------
+   Files live in OPFS (the browser's file system for web apps), written in
+   small streamed chunks. The old way — one giant blob in a single
+   IndexedDB write — is exactly where big-book adds died on phones.
+   IndexedDB 'files' stays as a read fallback for books added by older
+   versions, so nothing already in the library is lost. */
+const FS = {
+  ok: !!(navigator.storage && navigator.storage.getDirectory),
+  async save(id, file){
+    const root = await navigator.storage.getDirectory();
+    const fh = await root.getFileHandle(id, { create: true });
+    const w = await fh.createWritable();
+    try {
+      const reader = file.stream().getReader();
+      for (;;) { const { done, value } = await reader.read(); if (done) break; await w.write(value); }
+      await w.close();
+    } catch (e) { try { await w.abort(); } catch (_) {} throw e; }
+    const saved = await fh.getFile();
+    if (saved.size !== file.size) throw new Error('Saved file is incomplete');
+  },
+  async get(id){
+    if (!FS.ok) return null;
+    try {
+      const root = await navigator.storage.getDirectory();
+      const fh = await root.getFileHandle(id);
+      return await fh.getFile();
+    } catch (e) { return null; }
+  },
+  async del(id){
+    if (!FS.ok) return;
+    try { const root = await navigator.storage.getDirectory(); await root.removeEntry(id); } catch (e) {}
+  }
+};
+async function saveBookFile(id, file){
+  if (FS.ok) { await FS.save(id, file); return; }
+  await DB.put('files', { id, blob: file });
+}
+async function getBookBlob(id){
+  const f = await FS.get(id);
+  if (f) return f;
+  const rec = await DB.get('files', id);
+  return (rec && rec.blob) || null;
+}
+
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '1.3';
+const APP_VERSION = '1.4';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -416,7 +460,7 @@ function bookSheet(id){
     { ic: '🗂️', label: 'Move to collection…', fn: () => collectionSheet(b) },
     { sep: true },
     { ic: '🗑️', label: 'Remove from library', fn: async () => {
-        await DB.del('books', id); await DB.del('files', id);
+        await DB.del('books', id); await DB.del('files', id); await FS.del(id);
         S.books = S.books.filter(x => x.id !== id); renderLibrary(); toast('Book removed');
     } }
   ];
@@ -470,8 +514,8 @@ async function addBookFile(f){
     if (noSpace) { const err = new Error('Not enough space on this phone'); err.name = 'QuotaExceededError'; throw err; }
   }
   /* One retry: a big write can abort once if the phone is busy, then succeed. */
-  try { await DB.put('files', { id, blob: f }); }
-  catch (e) { await new Promise(r => setTimeout(r, 700)); await DB.put('files', { id, blob: f }); }
+  try { await saveBookFile(id, f); }
+  catch (e) { await new Promise(r => setTimeout(r, 700)); await saveBookFile(id, f); }
   if (existing) return 'ok'; // re-downloaded same book: keep progress & edits (ReadEra-style)
   const rec = { id, name: f.name, title: f.name.replace(/\.[^.]+$/, ''), author: '', format,
     size: f.size, addedAt: Date.now(), lastReadAt: 0, progress: null, totalPages: 0,
@@ -537,8 +581,8 @@ $('#libMenuBtn').addEventListener('click', () => {
 /* ---------------- Reader core ---------------- */
 async function openBook(id){
   const b = S.books.find(x => x.id === id); if (!b) return;
-  const fileRec = await DB.get('files', id);
-  if (!fileRec || !fileRec.blob) { toast('Book file not found on this phone'); return; }
+  const blob = await getBookBlob(id);
+  if (!blob) { toast('Book file not found on this phone'); return; }
   S.cur = b; S.loading = true; b.lastReadAt = Date.now(); DB.put('books', b);
   $('#rTitle').textContent = b.title;
   $('#library').classList.add('hidden');
@@ -547,7 +591,7 @@ async function openBook(id){
   $('#pdfPages').classList.add('hidden'); $('#epubHost').classList.add('hidden'); $('#txtHost').classList.add('hidden');
   $('#rAnnotate').classList.toggle('hidden', b.format !== 'pdf');
   setAnnoMode(false);
-  const buf = await fileRec.blob.arrayBuffer();
+  const buf = await blob.arrayBuffer();
   if (b.format === 'pdf') await openPdf(buf);
   else if (b.format === 'epub') await openEpub(buf);
   else await openTxt(buf);
@@ -1084,8 +1128,8 @@ async function exportAnnotatedPdf(){
   if (!has) { toast('Abhi is book me koi tick ya likhai nahi hai'); return; }
   toast('PDF tayyar ho raha hai…');
   try {
-    const fileRec = await DB.get('files', b.id);
-    const bytes = await fileRec.blob.arrayBuffer();
+    const srcBlob = await getBookBlob(b.id);
+    const bytes = await srcBlob.arrayBuffer();
     const doc = await PDFLib.PDFDocument.load(bytes);
     const pages = doc.getPages();
     Object.entries(S.anno.data).forEach(([num, strokes]) => {
@@ -1151,6 +1195,8 @@ window.addEventListener('popstate', () => {
   applyTheme();
   renderLibrary();
   try { history.pushState({ kr: 'root' }, ''); } catch (e) {}
+  /* ask the browser to treat the library as permanent, not evictable */
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
 </script>
