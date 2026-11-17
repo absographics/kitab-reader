@@ -253,6 +253,9 @@ const DB = {
   del(store, key) { return DB.tx(store, 'readwrite', s => s.delete(key)); }
 };
 
+/* Bump APP_VERSION on every fix, so abso can check in Settings which
+   build his phone is actually running (stale-cache diagnosis). */
+const APP_VERSION = '1.2';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -364,21 +367,46 @@ function renderLibrary(){
         <div style="font-size:22px;color:var(--mut);">›</div>
       </div>`).join('') : '';
   const list = viewBooks();
-  $('#bookGrid').innerHTML = list.map(b => `
-    <div class="book" data-open="${b.id}">
+  S._viewList = list; S.libShown = 0;
+  $('#bookGrid').innerHTML = '';
+  appendBookBatch();
+  ensureGridSentinel();
+  $('#libEmpty').classList.toggle('hidden', S.books.length > 0);
+  $$('#continueSec [data-open]').forEach(el => bindBookEl(el));
+}
+function bindBookEl(el){
+  el.addEventListener('click', () => openBook(el.dataset.open));
+  el.addEventListener('contextmenu', (e) => { e.preventDefault(); bookSheet(el.dataset.open); });
+  let lp; el.addEventListener('touchstart', () => { lp = setTimeout(() => bookSheet(el.dataset.open), 550); }, { passive: true });
+  el.addEventListener('touchend', () => clearTimeout(lp));
+  el.addEventListener('touchmove', () => clearTimeout(lp), { passive: true });
+}
+function bookCardHTML(b){
+  return `<div class="book" data-open="${b.id}">
       <div class="cov">${coverHTML(b)}<span class="fmt">${b.format.toUpperCase()}</span></div>
       <div class="bt">${esc(b.title)}</div>
       <div class="ba">${esc(b.author || '')}</div>
       ${b.progress ? `<div class="bp"><i style="width:${b.progress.pct||0}%"></i></div>` : ''}
-    </div>`).join('');
-  $('#libEmpty').classList.toggle('hidden', S.books.length > 0);
-  $$('#bookGrid [data-open], #continueSec [data-open]').forEach(el => {
-    el.addEventListener('click', () => openBook(el.dataset.open));
-    el.addEventListener('contextmenu', (e) => { e.preventDefault(); bookSheet(el.dataset.open); });
-    let lp; el.addEventListener('touchstart', () => { lp = setTimeout(() => bookSheet(el.dataset.open), 550); }, { passive: true });
-    el.addEventListener('touchend', () => clearTimeout(lp));
-    el.addEventListener('touchmove', () => clearTimeout(lp), { passive: true });
-  });
+    </div>`;
+}
+/* render the grid in batches so even thousands of books never freeze the library */
+function appendBookBatch(){
+  const list = S._viewList || [];
+  const next = list.slice(S.libShown, S.libShown + 60);
+  if (!next.length) return;
+  const before = $('#bookGrid').children.length;
+  $('#bookGrid').insertAdjacentHTML('beforeend', next.map(bookCardHTML).join(''));
+  Array.from($('#bookGrid').children).slice(before).forEach(el => bindBookEl(el));
+  S.libShown += next.length;
+}
+const gridIO = new IntersectionObserver((es) => { if (es.some(e => e.isIntersecting)) appendBookBatch(); }, { rootMargin: '900px' });
+function ensureGridSentinel(){
+  let s = document.getElementById('gridSentinel');
+  if (!s) {
+    s = document.createElement('div'); s.id = 'gridSentinel'; s.style.height = '4px';
+    $('#bookGrid').after(s);
+  }
+  gridIO.observe(s);
 }
 function bookSheet(id){
   const b = S.books.find(x => x.id === id); if (!b) return;
@@ -425,38 +453,47 @@ async function addBookFile(f){
   if (existing) return; // re-downloaded same book: keep progress & edits (ReadEra-style)
   const rec = { id, name: f.name, title: f.name.replace(/\.[^.]+$/, ''), author: '', format,
     size: f.size, addedAt: Date.now(), lastReadAt: 0, progress: null, totalPages: 0,
-    fav: false, toRead: false, haveRead: false, collection: null, cover: null };
-  if (format === 'pdf') {
-    try {
-      const buf = await f.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-      rec.totalPages = pdf.numPages;
-      const md = await pdf.getMetadata().catch(() => null);
-      if (md && md.info && md.info.Title) rec.title = md.info.Title;
-      if (md && md.info && md.info.Author) rec.author = md.info.Author;
-      const page = await pdf.getPage(1);
-      const vp = page.getViewport({ scale: 0.35 });
-      const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
-      await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
-      rec.cover = cv.toDataURL('image/jpeg', 0.72);
-      pdf.destroy();
-    } catch (err) { console.warn('pdf meta', err); }
-  } else if (format === 'epub') {
-    try {
-      const bk = ePub(await f.arrayBuffer());
-      const meta = await bk.loaded.metadata;
-      if (meta && meta.title) rec.title = meta.title;
-      if (meta && meta.creator) rec.author = meta.creator;
-      const cov = await bk.coverUrl().catch(() => null);
-      if (cov) {
-        const blob = await (await fetch(cov)).blob();
-        rec.cover = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
-      }
-      bk.destroy();
-    } catch (err) { console.warn('epub meta', err); }
-  }
+    fav: false, toRead: false, haveRead: false, collection: null, cover: null, metaDone: false };
+  // Instant add: NO opening/parsing the book here — a heavy book used to freeze
+  // or fail the add. Title/author/cover/pages are filled in on first open.
   S.books.push(rec);
   await DB.put('books', rec);
+}
+/* fill in title/author/cover once, when the book is first opened */
+async function enrichPdfMeta(b){
+  if (b.metaDone || !S.pdf) return;
+  try {
+    const md = await S.pdf.getMetadata().catch(() => null);
+    if (md && md.info) {
+      if (md.info.Title) b.title = md.info.Title;
+      if (md.info.Author) b.author = md.info.Author;
+    }
+    const page = await S.pdf.getPage(1);
+    const base = page.getViewport({ scale: 1 });
+    const vp = page.getViewport({ scale: 190 / base.width });
+    const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
+    await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+    b.cover = cv.toDataURL('image/jpeg', 0.72);
+    b.metaDone = true;
+    $('#rTitle').textContent = b.title;
+    await DB.put('books', b);
+  } catch (err) { console.warn('enrich pdf', err); }
+}
+async function enrichEpubMeta(b){
+  if (b.metaDone || !S.epubBook) return;
+  try {
+    const meta = await S.epubBook.loaded.metadata;
+    if (meta && meta.title) b.title = meta.title;
+    if (meta && meta.creator) b.author = meta.creator;
+    const cov = await S.epubBook.coverUrl().catch(() => null);
+    if (cov) {
+      const blob = await (await fetch(cov)).blob();
+      b.cover = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
+    }
+    b.metaDone = true;
+    $('#rTitle').textContent = b.title;
+    await DB.put('books', b);
+  } catch (err) { console.warn('enrich epub', err); }
 }
 
 /* search + library menu */
@@ -546,6 +583,7 @@ async function openPdf(buf){
   S.curPage = start;
   $('#pageSlider').max = S.pdf.numPages; $('#pageSlider').value = start;
   requestAnimationFrame(() => { scrollToPage(start, 'auto'); updatePageInfo(); });
+  enrichPdfMeta(S.cur);
 }
 function layoutPdfPages(){
   if (!S.pdf) return;
@@ -630,6 +668,7 @@ async function openEpub(buf){
   applyEpubTheme();
   const startCfi = S.cur.progress && S.cur.progress.cfi;
   await rend.display(startCfi || undefined);
+  enrichEpubMeta(S.cur);
   $('#rPageInfo').textContent = S.cur.progress ? Math.round(S.cur.progress.pct || 0) + '%' : '';
   $('#pageSlider').max = 100; $('#pageSlider').value = (S.cur.progress && S.cur.progress.pct) || 0;
   rend.on('relocated', (loc) => {
@@ -772,7 +811,7 @@ function openSettings(){
         <button class="themeBtn ${st.pdfSepia ? 'sel':''}" data-pm="sepia">Sepia</button>
         <button class="themeBtn ${st.pdfNight ? 'sel':''}" data-pm="night">Night</button>
       </div></div>
-    <div class="setRow" style="color:var(--mut);font-size:13px;">Books and edits are stored only on this phone.</div>
+    <div class="setRow" style="color:var(--mut);font-size:13px;">Books and edits are stored only on this phone. · App version ${APP_VERSION}</div>
   `);
   $$('#sheet [data-th]').forEach(b => b.addEventListener('click', () => { S.settings.theme = b.dataset.th; saveSettings(); applyTheme(); openSettings(); }));
   $$('#sheet [data-pm]').forEach(b => b.addEventListener('click', () => {

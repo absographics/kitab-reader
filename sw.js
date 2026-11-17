@@ -1,4 +1,4 @@
-const CACHE = 'kitab-reader-v3';
+const CACHE = 'kitab-reader-v4';
 const SHELL = [
   './',
   './index.html',
@@ -35,8 +35,26 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+// index.html (and navigations) are network-first: the old cache-first
+// handler served the very first cached index.html forever, so the two
+// PDF-quality fixes deployed 17 Nov 2026 never reached the phone —
+// sw.js itself never changed, so the browser never installed a new
+// service worker. Library files stay cache-first (they rarely change).
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  const url = new URL(e.request.url);
+  const isAppShell = e.request.mode === 'navigate' ||
+    url.pathname === '/' || url.pathname.endsWith('/index.html');
+  if (isAppShell) {
+    e.respondWith(
+      fetch(e.request).then((res) => {
+        const copy = res.clone();
+        caches.open(CACHE).then((cache) => cache.put(e.request, copy)).catch(() => {});
+        return res;
+      }).catch(() => caches.match(e.request, { ignoreSearch: true }))
+    );
+    return;
+  }
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then((hit) => {
       if (hit) return hit;
