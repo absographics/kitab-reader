@@ -314,7 +314,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '1.8';
+const APP_VERSION = '1.9';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -384,12 +384,22 @@ function renderDrawer(){
   } else {
     html += '<div style="padding:4px 18px 8px;font-size:13px;color:var(--mut);">No collections yet — tap ＋ New, or long-press any book.</div>';
   }
+  html += '<div class="dsep"></div><div class="dsec"><span>GOOGLE DRIVE</span></div>';
+  if (driveToken()) {
+    html += '<button class="ditem" data-v="__driveSync"><span class="ic">☁️</span>Drive connected — Sync now</button>';
+    html += '<button class="ditem" data-v="__driveOff"><span class="ic">✕</span>Disconnect Drive</button>';
+  } else {
+    html += '<button class="ditem" data-v="__driveOn"><span class="ic">☁️</span>Connect Google Drive</button>';
+  }
   html += '<div class="dsep"></div><button class="ditem" data-v="__settings"><span class="ic">⚙️</span>Settings</button>';
   nav.innerHTML = html;
   nav.querySelectorAll('.ditem').forEach(b => b.addEventListener('click', () => {
     if (window._colLPAt && Date.now() - window._colLPAt < 700) return; // a long-press just opened the manage sheet
     closeDrawer();
     if (b.dataset.v === '__settings') return openSettings();
+    if (b.dataset.v === '__driveOn') return connectDrive();
+    if (b.dataset.v === '__driveSync') return driveSync();
+    if (b.dataset.v === '__driveOff') { try { localStorage.removeItem('kitab_drive_token'); } catch (e) {} renderDrawer(); return toast('Drive disconnected'); }
     S.view = b.dataset.v; renderLibrary();
   }));
   const nb = nav.querySelector('[data-newcol]');
@@ -683,7 +693,94 @@ if (NATIVE) {
 }
 { const pa = $('#phoneAllow'); if (pa) pa.addEventListener('click', () => { if (window.KitabNative) window.KitabNative.requestAccess(); }); }
 
-/* fill in title/author/cover once, when the book is first opened */
+/* ================= GOOGLE DRIVE =================
+   Books that live in the user's Google Drive flow in on their own, the same
+   way phone files do. Sign-in happens in the real browser (Google does not
+   allow it inside a WebView); drive-auth.html hands the token back. */
+const DRIVE_CLIENT_ID = '296822007681-35pv62i1nockqaddopb6f7242l5rj3m0.apps.googleusercontent.com';
+function driveToken(){
+  try {
+    const d = JSON.parse(localStorage.getItem('kitab_drive_token') || 'null');
+    return (d && d.t && d.exp > Date.now() + 30000) ? d.t : null;
+  } catch (e) { return null; }
+}
+function setDriveToken(t, expSec){
+  try { localStorage.setItem('kitab_drive_token', JSON.stringify({ t, exp: Date.now() + (expSec || 3600) * 1000 })); } catch (e) {}
+  renderDrawer();
+}
+function connectDrive(){
+  const url = 'https://accounts.google.com/o/oauth2/v2/auth?client_id=' + encodeURIComponent(DRIVE_CLIENT_ID)
+    + '&redirect_uri=' + encodeURIComponent(location.origin + '/drive-auth.html')
+    + '&response_type=token&scope=' + encodeURIComponent('https://www.googleapis.com/auth/drive.readonly')
+    + '&state=' + (NATIVE ? 'app' : 'web') + '&prompt=consent';
+  if (NATIVE && window.KitabNative.openUrl) window.KitabNative.openUrl(url);
+  else location.href = url;
+}
+window.KitabDriveTokenCb = function (t, expSec) {
+  setDriveToken(t, expSec);
+  toast('Google Drive connected');
+  driveSync();
+};
+async function addDriveBook(f){
+  const format = f.mimeType === 'application/pdf' ? 'pdf'
+    : f.mimeType === 'text/plain' ? 'txt'
+    : f.mimeType === 'application/epub+zip' ? 'epub' : fmtOf(f.name);
+  if (!['pdf', 'epub', 'txt'].includes(format)) return 'skip';
+  const size = +f.size || 0;
+  const id = bookIdFor(f.name, size);
+  if (S.books.find(b => b.id === id)) return 'dup';
+  const tok = driveToken();
+  const res = await fetch('https://www.googleapis.com/drive/v3/files/' + f.id + '?alt=media',
+    { headers: { Authorization: 'Bearer ' + tok } });
+  if (!res.ok || !res.body) throw new Error('Drive download failed (' + res.status + ')');
+  await saveBookStream(id, size, res.body);
+  const rec = { id, name: f.name, title: f.name.replace(/\.[^.]+$/, ''), author: '', format,
+    size, addedAt: Date.now(), lastReadAt: 0, progress: null, totalPages: 0,
+    fav: false, toRead: false, haveRead: false, collection: null, cover: null, metaDone: false,
+    driveId: f.id };
+  S.books.push(rec);
+  await DB.put('books', rec);
+  return 'ok';
+}
+async function driveSync(){
+  const tok = driveToken();
+  if (!tok || S.driveSyncing) { renderDrawer(); return; }
+  S.driveSyncing = true;
+  try {
+    const q = encodeURIComponent("mimeType = 'application/pdf' or mimeType = 'application/epub+zip' or mimeType = 'text/plain'");
+    let files = [], pageToken = '';
+    do {
+      const u = 'https://www.googleapis.com/drive/v3/files?q=' + q
+        + '&fields=nextPageToken,files(id,name,mimeType,size)&pageSize=1000'
+        + (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
+      const r = await fetch(u, { headers: { Authorization: 'Bearer ' + tok } });
+      if (r.status === 401) {
+        try { localStorage.removeItem('kitab_drive_token'); } catch (e) {}
+        toast('Drive connection expired — please connect again');
+        return;
+      }
+      if (!r.ok) throw new Error('Drive list failed (' + r.status + ')');
+      const j = await r.json();
+      files = files.concat(j.files || []);
+      pageToken = j.nextPageToken || '';
+    } while (pageToken);
+    const fresh = files.filter(f => f.size && !S.books.find(b => b.id === bookIdFor(f.name, +f.size)));
+    if (fresh.length) toast('Bringing ' + fresh.length + ' book' + (fresh.length === 1 ? '' : 's') + ' from Google Drive…', 5000);
+    let added = 0, failed = 0;
+    for (const f of fresh) {
+      try { if (await addDriveBook(f) === 'ok') added++; }
+      catch (e) { failed++; console.warn('drive add failed', f.name, e); }
+    }
+    if (added) {
+      renderLibrary();
+      toast(added === 1 ? '1 book arrived from Drive' : added + ' books arrived from Drive', 4500);
+    }
+    if (failed) toast(failed + ' book' + (failed === 1 ? '' : 's') + ' could not be downloaded from Drive');
+  } catch (e) { console.warn('drive sync', e); }
+  finally { S.driveSyncing = false; renderDrawer(); }
+}
+
+/* fill in author/cover once, when the book is first opened (never the title) */
 async function enrichPdfMeta(b){
   if (b.metaDone || !S.pdf) return;
   try {
@@ -1379,6 +1476,7 @@ window.addEventListener('popstate', () => {
   }
   applyTheme();
   renderLibrary();
+  if (driveToken()) driveSync();
   try { history.pushState({ kr: 'root' }, ''); } catch (e) {}
   /* ask the browser to treat the library as permanent, not evictable */
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});

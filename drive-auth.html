@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kitab Reader — Google Drive</title>
+<style>
+  body{margin:0;font-family:system-ui,sans-serif;background:#0b3b39;color:#f5efe0;text-align:center;padding:56px 24px;}
+  .big{font-size:44px;}
+  p{font-size:17px;line-height:1.5;}
+</style>
+</head>
+<body>
+<div class="big">☁️</div>
+<p id="msg">Connecting Google Drive…</p>
+<script>
+(function(){
+  var frag = new URLSearchParams(location.hash.slice(1));
+  var query = new URLSearchParams(location.search);
+  var token = frag.get('access_token');
+  var exp = +(frag.get('expires_in') || 3600);
+  var state = query.get('state') || frag.get('state');
+  var msg = document.getElementById('msg');
+  if (token) {
+    /* Website flow: the app itself reads this on its next load. */
+    try { localStorage.setItem('kitab_drive_token', JSON.stringify({ t: token, exp: Date.now() + exp * 1000 })); } catch (e) {}
+    if (state === 'app') {
+      /* App flow: hand the token back to the Android app. */
+      msg.textContent = 'Returning to Kitab Reader…';
+      location.href = 'kitabreader://oauth#access_token=' + encodeURIComponent(token) + '&expires_in=' + exp;
+      return;
+    }
+    location.replace('/');
+  } else {
+    msg.textContent = 'The Drive connection did not complete. You can close this tab and try again from the app.';
+  }
+})();
+</script>
+</body>
+</html>

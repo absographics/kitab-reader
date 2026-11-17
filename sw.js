@@ -1,9 +1,10 @@
-const CACHE = 'kitab-reader-v16';
+const CACHE = 'kitab-reader-v17';
 
 const SHELL = [
   './',
   './index.html',
   './install.html',
+  './drive-auth.html',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
