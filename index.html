@@ -362,8 +362,7 @@ function renderLibrary(){
     '<div class="secTitle">Continue reading</div>' + cont.map(b => `
       <div class="contCard" data-open="${b.id}">
         ${b.cover ? `<img src="${b.cover}" alt="">` : '<img alt="">'}
-        <div class="contMeta"><div class="t">${esc(b.title)}</div><div class="a">${esc(b.author || b.format.toUpperCase())} · ${Math.round(b.progress.pct)}%</div>
-        <div class="pbar"><i style="width:${b.progress.pct}%"></i></div></div>
+        <div class="contMeta"><div class="t">${esc(b.title)}</div><div class="a">${esc(b.author || b.format.toUpperCase())}</div></div>
         <div style="font-size:22px;color:var(--mut);">›</div>
       </div>`).join('') : '';
   const list = viewBooks();
@@ -386,7 +385,6 @@ function bookCardHTML(b){
       <div class="cov">${coverHTML(b)}<span class="fmt">${b.format.toUpperCase()}</span></div>
       <div class="bt">${esc(b.title)}</div>
       <div class="ba">${esc(b.author || '')}</div>
-      ${b.progress ? `<div class="bp"><i style="width:${b.progress.pct||0}%"></i></div>` : ''}
     </div>`;
 }
 /* render the grid in batches so even thousands of books never freeze the library */
@@ -516,7 +514,7 @@ async function openBook(id){
   const b = S.books.find(x => x.id === id); if (!b) return;
   const fileRec = await DB.get('files', id);
   if (!fileRec || !fileRec.blob) { toast('Book file not found on this phone'); return; }
-  S.cur = b; b.lastReadAt = Date.now(); DB.put('books', b);
+  S.cur = b; S.loading = true; b.lastReadAt = Date.now(); DB.put('books', b);
   $('#rTitle').textContent = b.title;
   $('#library').classList.add('hidden');
   $('#reader').classList.add('open');
@@ -527,6 +525,7 @@ async function openBook(id){
   if (b.format === 'pdf') await openPdf(buf);
   else if (b.format === 'epub') await openEpub(buf);
   else await openTxt(buf);
+  S.loading = false;
   renderLibrary();
 }
 function closeBook(){
@@ -543,7 +542,7 @@ function closeBook(){
 $('#rBack').addEventListener('click', closeBook);
 
 function saveProgress(){
-  const b = S.cur; if (!b) return;
+  const b = S.cur; if (!b || S.loading) return;
   if (b.format === 'pdf' && S.pdf) b.progress = { page: S.curPage, pct: S.curPage / S.pdf.numPages * 100 };
   else if (b.format === 'txt') {
     const rb = $('#rBody'); const max = rb.scrollHeight - rb.clientHeight;
@@ -593,6 +592,10 @@ async function openPdf(buf){
   S.curPage = start;
   $('#pageSlider').max = S.pdf.numPages; $('#pageSlider').value = start;
   requestAnimationFrame(() => { scrollToPage(start, 'auto'); updatePageInfo(); });
+  /* re-assert the saved place once first pages settle — but never yank a reader who already moved on */
+  setTimeout(() => {
+    if (S.cur && S.pdf && $('#reader').classList.contains('open') && Math.abs(S.curPage - start) <= 1) scrollToPage(start, 'auto');
+  }, 700);
   enrichPdfMeta(S.cur);
 }
 function layoutPdfPages(){
@@ -658,7 +661,7 @@ function updatePageInfo(){
   }
 }
 $('#rBody').addEventListener('scroll', () => {
-  if (!S.cur) return;
+  if (!S.cur || S.loading) return;
   if (S.cur.format === 'pdf' && S.pdf) {
     const rb = $('#rBody'); const mid = rb.scrollTop + rb.clientHeight * 0.35;
     let cur = 1;
