@@ -314,7 +314,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.8';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -689,7 +689,8 @@ async function enrichPdfMeta(b){
   try {
     const md = await S.pdf.getMetadata().catch(() => null);
     if (md && md.info) {
-      if (md.info.Title) b.title = md.info.Title;
+      /* The book's name is ALWAYS its file's name — never the title hidden
+         inside the PDF (abso's rule: file names must not change). */
       if (md.info.Author) b.author = md.info.Author;
     }
     const page = await S.pdf.getPage(1);
@@ -707,7 +708,7 @@ async function enrichEpubMeta(b){
   if (b.metaDone || !S.epubBook) return;
   try {
     const meta = await S.epubBook.loaded.metadata;
-    if (meta && meta.title) b.title = meta.title;
+    /* Same rule as PDF: the file's name wins, never the inside title. */
     if (meta && meta.creator) b.author = meta.creator;
     const cov = await S.epubBook.coverUrl().catch(() => null);
     if (cov) {
@@ -1370,6 +1371,12 @@ window.addEventListener('popstate', () => {
 (async function init(){
   try { await DB.open(); } catch (e) { toast('Storage khul nahi paya'); return; }
   S.books = await DB.all('books');
+  /* A book's name in this app is always its file's name. Repair any book an
+     older version renamed from the title hidden inside its file. */
+  for (const b of S.books) {
+    const want = (b.name || '').replace(/\.[^.]+$/, '');
+    if (want && b.title !== want) { b.title = want; DB.put('books', b); }
+  }
   applyTheme();
   renderLibrary();
   try { history.pushState({ kr: 'root' }, ''); } catch (e) {}
