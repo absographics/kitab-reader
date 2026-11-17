@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Install Kitab Reader</title>
+<meta name="theme-color" content="#0b5340">
+<link rel="manifest" href="./manifest.json">
+<link rel="icon" href="./icon-192.png">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: Georgia, 'Times New Roman', serif; background:#f3eee2; color:#20242a; min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+  .card { background:#fffdf7; border:1px solid #e3dcc8; border-radius:20px; box-shadow:0 10px 34px rgba(11,83,64,.16); max-width:380px; width:100%; text-align:center; padding:36px 26px 30px; }
+  .card img { width:96px; height:96px; border-radius:22px; box-shadow:0 4px 14px rgba(0,0,0,.2); }
+  h1 { font-size:26px; margin:18px 0 6px; color:#0b5340; }
+  p { font-size:15px; color:#6b6f66; line-height:1.45; }
+  #installBtn { margin-top:24px; width:100%; padding:16px; font-size:18px; font-family:inherit; font-weight:bold; color:#fff; background:#0b5340; border:none; border-radius:14px; cursor:pointer; box-shadow:0 6px 16px rgba(11,83,64,.35); }
+  #installBtn:active { transform:scale(.98); }
+  #status { margin-top:16px; font-size:14px; color:#6b6f66; min-height:20px; }
+  #openRow { margin-top:10px; display:none; }
+  #openRow a { color:#0b5340; font-weight:bold; font-size:16px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <img src="./icon-512.png" alt="Kitab Reader">
+    <h1>Kitab Reader</h1>
+    <p>Your books, on your phone.<br>Read PDF, EPUB and TXT — with pen, tick and notes on the page.</p>
+    <button id="installBtn">📲 Install the App</button>
+    <div id="status">Preparing the install…</div>
+    <div id="openRow"><a href="./">Open Kitab Reader →</a></div>
+  </div>
+<script>
+  var deferred = null;
+  var statusEl = document.getElementById('status');
+  var btn = document.getElementById('installBtn');
+  var openRow = document.getElementById('openRow');
+
+  function setStatus(t) { statusEl.textContent = t; }
+
+  function isStandalone() {
+    return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  }
+
+  if (isStandalone()) {
+    btn.style.display = 'none';
+    setStatus('The app is already installed on this phone.');
+    openRow.style.display = 'block';
+  }
+
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    deferred = e;
+    setStatus('Ready — tap the button and the install will start.');
+    /* Try to open the install dialog straight away; Chrome may insist on
+       the button tap instead, which is handled below. */
+    try { deferred.prompt(); } catch (err) {}
+  });
+
+  window.addEventListener('appinstalled', function () {
+    deferred = null;
+    btn.style.display = 'none';
+    setStatus('Installed! Find Kitab Reader on your home screen.');
+    openRow.style.display = 'block';
+  });
+
+  btn.addEventListener('click', async function () {
+    if (deferred) {
+      try {
+        await deferred.prompt();
+        var choice = await deferred.userChoice;
+        if (choice && choice.outcome === 'accepted') setStatus('Installing… look for Kitab Reader on your home screen.');
+        else setStatus('Install was closed. Tap the button to try again.');
+        deferred = null;
+      } catch (err) { setStatus('Tap again to start the install.'); }
+    } else if (isStandalone()) {
+      setStatus('The app is already installed on this phone.');
+      openRow.style.display = 'block';
+    } else {
+      setStatus('Open this link in the Chrome browser, then tap Install.');
+    }
+  });
+
+  setTimeout(function () {
+    if (!deferred && !isStandalone()) setStatus('If no install box appears, open this link in the Chrome browser and tap Install.');
+  }, 4000);
+
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
+</script>
+</body>
+</html>

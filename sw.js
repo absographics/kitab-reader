@@ -1,8 +1,9 @@
-const CACHE = 'kitab-reader-v10';
+const CACHE = 'kitab-reader-v11';
 
 const SHELL = [
   './',
   './index.html',
+  './install.html',
   './manifest.json',
   './icon-192.png',
   './icon-512.png',
@@ -18,6 +19,7 @@ self.addEventListener('install', (e) => {
     caches.open(CACHE).then(async (cache) => {
       await cache.add('./').catch(() => {});
       await cache.add('./index.html').catch(() => {});
+      await cache.add('./install.html').catch(() => {});
       await cache.add('./manifest.json').catch(() => {});
       await cache.add('./icon-192.png').catch(() => {});
       await cache.add('./icon-512.png').catch(() => {});
