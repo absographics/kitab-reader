@@ -73,6 +73,10 @@ body.console .topbar{background:#000; border-bottom:1px solid var(--line);}
 .ditem.sel{color:var(--teal); font-weight:bold;}
 body.night .ditem.sel, body.console .ditem.sel{color:var(--gold);}
 .dsep{height:1px; background:var(--line); margin:7px 0;}
+.dsec{display:flex; align-items:center; justify-content:space-between; padding:10px 18px 2px; font-size:11.5px; letter-spacing:1.4px; color:var(--mut); font-weight:bold;}
+.dsec button{background:var(--chip); border:none; color:var(--ink); border-radius:12px; padding:4px 12px; font-size:13.5px; cursor:pointer; letter-spacing:0;}
+.ditem .cnt{margin-left:auto; font-size:12.5px; color:var(--mut); font-weight:normal;}
+#reader.uihide #rTop, #reader.uihide #rBot{display:none;}
 
 /* sheets */
 .sheetWrap{position:fixed; inset:0; z-index:40; display:none;}
@@ -299,7 +303,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '1.5';
+const APP_VERSION = '1.6';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -348,23 +352,74 @@ const VIEWS = [
   { id: 'fmt:epub', label: 'EPUB', ic: '📘' },
   { id: 'fmt:txt', label: 'TXT', ic: '📝' }
 ];
-function collections(){ return Array.from(new Set(S.books.map(b => b.collection).filter(Boolean))).sort(); }
+const COLS_KEY = 'kitab_collections_v1';
+function storedCollections(){ try { return JSON.parse(localStorage.getItem(COLS_KEY) || '[]'); } catch (e) { return []; } }
+function saveCollections(list){ try { localStorage.setItem(COLS_KEY, JSON.stringify(list)); } catch (e) {} }
+function collections(){
+  const names = new Set(storedCollections());
+  S.books.forEach(b => { if (b.collection) names.add(b.collection); });
+  return Array.from(names).sort();
+}
+function collectionCount(c){ return S.books.filter(b => b.collection === c).length; }
 function renderDrawer(){
   const nav = $('#drawerNav');
   let html = VIEWS.map(v => v.sep ? '<div class="dsep"></div>' :
     `<button class="ditem ${S.view===v.id?'sel':''}" data-v="${v.id}"><span class="ic">${v.ic}</span>${v.label}</button>`).join('');
   const cols = collections();
+  html += '<div class="dsep"></div><div class="dsec"><span>COLLECTIONS</span><button data-newcol="1" aria-label="New collection">＋ New</button></div>';
   if (cols.length){
-    html += '<div class="dsep"></div>' + cols.map(c =>
-      `<button class="ditem ${S.view==='col:'+c?'sel':''}" data-v="col:${esc(c)}"><span class="ic">🗂️</span>${esc(c)}</button>`).join('');
+    html += cols.map(c =>
+      `<button class="ditem ${S.view==='col:'+c?'sel':''}" data-v="col:${esc(c)}"><span class="ic">🗂️</span>${esc(c)}<span class="cnt">${collectionCount(c)}</span></button>`).join('');
+  } else {
+    html += '<div style="padding:4px 18px 8px;font-size:13px;color:var(--mut);">No collections yet — tap ＋ New, or long-press any book.</div>';
   }
   html += '<div class="dsep"></div><button class="ditem" data-v="__settings"><span class="ic">⚙️</span>Settings</button>';
   nav.innerHTML = html;
   nav.querySelectorAll('.ditem').forEach(b => b.addEventListener('click', () => {
+    if (window._colLPAt && Date.now() - window._colLPAt < 700) return; // a long-press just opened the manage sheet
     closeDrawer();
     if (b.dataset.v === '__settings') return openSettings();
     S.view = b.dataset.v; renderLibrary();
   }));
+  const nb = nav.querySelector('[data-newcol]');
+  if (nb) nb.addEventListener('click', () => {
+    const name = prompt('New collection name:'); if (!name || !name.trim()) return;
+    const n = name.trim(), list = storedCollections();
+    if (!list.includes(n)) { list.push(n); saveCollections(list); }
+    renderDrawer();
+    toast('Collection "' + n + '" created — long-press a book to add it');
+  });
+  nav.querySelectorAll('.ditem[data-v^="col:"]').forEach(b => {
+    const c = b.dataset.v.slice(4);
+    const fire = () => { window._colLPAt = Date.now(); closeDrawer(); collectionManageSheet(c); };
+    b.addEventListener('contextmenu', (e) => { e.preventDefault(); fire(); });
+    let lp; b.addEventListener('touchstart', () => { lp = setTimeout(fire, 550); }, { passive: true });
+    b.addEventListener('touchend', () => clearTimeout(lp));
+    b.addEventListener('touchmove', () => clearTimeout(lp), { passive: true });
+  });
+}
+function collectionManageSheet(c){
+  const n = collectionCount(c);
+  const rows = [
+    { ic: '📚', label: 'Open collection (' + n + ' book' + (n === 1 ? '' : 's') + ')', fn: () => { S.view = 'col:' + c; renderLibrary(); } },
+    { ic: '✏️', label: 'Rename collection…', fn: async () => {
+        const name = prompt('Rename collection:', c); if (!name || !name.trim() || name.trim() === c) return;
+        const nn = name.trim();
+        const list = storedCollections().map(x => x === c ? nn : x);
+        if (!list.includes(nn)) list.push(nn);
+        saveCollections(list);
+        for (const b of S.books) if (b.collection === c) { b.collection = nn; await DB.put('books', b); }
+        if (S.view === 'col:' + c) S.view = 'col:' + nn;
+        renderLibrary(); toast('Collection renamed to "' + nn + '"');
+    } },
+    { ic: '🗑️', label: 'Delete collection — books stay in the library', fn: async () => {
+        saveCollections(storedCollections().filter(x => x !== c));
+        for (const b of S.books) if (b.collection === c) { b.collection = null; await DB.put('books', b); }
+        if (S.view === 'col:' + c) S.view = 'all';
+        renderLibrary(); toast('Collection deleted — books kept');
+    } }
+  ];
+  openSheet('<h3>' + esc(c) + '</h3>'); sheetRows(rows);
 }
 function openDrawer(){ $('#drawer').classList.add('open'); $('#scrim').classList.add('open'); }
 function closeDrawer(){ $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); }
@@ -482,11 +537,11 @@ $('#fab').addEventListener('click', () => $('#fileInput').click());
 $('#fileInput').addEventListener('change', async (e) => {
   const files = Array.from(e.target.files || []); e.target.value = '';
   if (!files.length) return;
-  let ok = 0; const failed = [];
+  let ok = 0, dup = 0; const failed = [];
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
     if (files.length > 1) toast('Adding ' + (i + 1) + ' of ' + files.length + ': ' + f.name, 4000);
-    try { const r = await addBookFile(f); if (r !== 'skip') ok++; }
+    try { const r = await addBookFile(f); if (r === 'dup') dup++; else if (r !== 'skip') ok++; }
     catch (err) { console.warn('add failed', f.name, err); failed.push({ name: f.name, err }); }
   }
   S.books = await DB.all('books');
@@ -494,8 +549,11 @@ $('#fileInput').addEventListener('change', async (e) => {
   if (failed.length) {
     const quota = failed.some(x => x.err && x.err.name === 'QuotaExceededError');
     toast('Could NOT add ' + failed.length + ' book(s)' + (quota ? ' — phone storage is full' : '') + ': ' + failed[0].name, 6000);
-  } else if (ok) {
-    toast(ok === 1 ? 'Book added to your library' : ok + ' books added to your library');
+  } else if (ok || dup) {
+    const parts = [];
+    if (ok) parts.push(ok === 1 ? '1 book added to your library' : ok + ' books added to your library');
+    if (dup) parts.push(dup === 1 ? '1 was already in your library' : dup + ' were already in your library');
+    toast(parts.join(' · '), 4500);
   }
 });
 /* Format by name first; if the name has no usable extension (common for
@@ -516,6 +574,10 @@ async function addBookFile(f){
   if (!['pdf','epub','txt'].includes(format)) { toast('Not supported yet: ' + f.name); return 'skip'; }
   const id = bookIdFor(f.name, f.size);
   const existing = S.books.find(b => b.id === id);
+  /* Same name + size is already in the library: keep the stored copy with its
+     progress and edits, and never write the file again — re-importing a whole
+     folder of books stays instant and duplicate-free. */
+  if (existing) return 'dup';
   /* Space check first: a big book on a nearly-full phone fails deep inside
      storage with nothing to show for it — catch it here, in plain words. */
   if (!existing && navigator.storage && navigator.storage.estimate) {
@@ -529,7 +591,6 @@ async function addBookFile(f){
   /* One retry: a big write can abort once if the phone is busy, then succeed. */
   try { await saveBookFile(id, f); }
   catch (e) { await new Promise(r => setTimeout(r, 700)); await saveBookFile(id, f); }
-  if (existing) return 'ok'; // re-downloaded same book: keep progress & edits (ReadEra-style)
   const rec = { id, name: f.name, title: f.name.replace(/\.[^.]+$/, ''), author: '', format,
     size: f.size, addedAt: Date.now(), lastReadAt: 0, progress: null, totalPages: 0,
     fav: false, toRead: false, haveRead: false, collection: null, cover: null, metaDone: false };
@@ -619,6 +680,7 @@ function closeBook(){
   S.pageEls = {}; S.cur = null;
   $('#pdfPages').innerHTML = '';
   $('#reader').classList.remove('open');
+  $('#reader').classList.remove('uihide');
   $('#library').classList.remove('hidden');
   renderLibrary();
 }
@@ -1003,6 +1065,7 @@ function refreshUndoBtns(){
 }
 function setAnnoMode(on){
   S.anno.on = on;
+  if (on) $('#reader').classList.remove('uihide');
   document.body.classList.toggle('annotating', on);
   $('#annoBar').classList.toggle('open', on);
   $('#rAnnotate').style.opacity = on ? '1' : '';
@@ -1010,6 +1073,25 @@ function setAnnoMode(on){
   $('#rAnnotate').style.borderRadius = '50%';
   if (on) buildAnnoBar();
 }
+/* A clean tap on a PDF page toggles full-screen reading (top + bottom bars
+   hide; tap again to bring them back) — like other reader apps. Scrolls,
+   drags, note dots and annotating never trigger it. */
+(function(){
+  let pd = null;
+  const host = $('#pdfPages');
+  if (!host) return;
+  host.addEventListener('pointerdown', (e) => { pd = { x: e.clientX, y: e.clientY, t: Date.now() }; }, { passive: true });
+  host.addEventListener('pointerup', (e) => {
+    if (!pd) return;
+    const moved = Math.hypot(e.clientX - pd.x, e.clientY - pd.y), dt = Date.now() - pd.t;
+    pd = null;
+    if (moved > 12 || dt > 350) return;
+    if (document.body.classList.contains('annotating')) return;
+    if ($('#sheetWrap').classList.contains('open')) return;
+    if (e.target.closest('button, a, input, .noteDot')) return;
+    $('#reader').classList.toggle('uihide');
+  }, { passive: true });
+})();
 $('#rAnnotate').addEventListener('click', () => setAnnoMode(!S.anno.on));
 
 function saveAnno(){
