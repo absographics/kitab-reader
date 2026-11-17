@@ -16,7 +16,11 @@
   p { font-size:15px; color:#6b6f66; line-height:1.45; }
   #installBtn { margin-top:24px; width:100%; padding:16px; font-size:18px; font-family:inherit; font-weight:bold; color:#fff; background:#0b5340; border:none; border-radius:14px; cursor:pointer; box-shadow:0 6px 16px rgba(11,83,64,.35); }
   #installBtn:active { transform:scale(.98); }
-  #status { margin-top:16px; font-size:14px; color:#6b6f66; min-height:20px; }
+  #status { margin-top:16px; font-size:14px; color:#6b6f66; min-height:20px; line-height:1.5; }
+  .warn { display:none; margin-top:20px; text-align:left; background:#fdf3e3; border:1px solid #e8cf9f; border-radius:14px; padding:14px 16px; font-size:14.5px; line-height:1.55; color:#5c4510; }
+  .warn strong { color:#7a5a08; }
+  .warn ol { margin:8px 0 4px 20px; }
+  .warn .ur { display:block; margin-top:8px; font-size:14px; color:#7a5a08; }
   #openRow { margin-top:10px; display:none; }
   #openRow a { color:#0b5340; font-weight:bold; font-size:16px; }
 </style>
@@ -28,6 +32,26 @@
     <p>Your books, on your phone.<br>Read PDF, EPUB and TXT — with pen, tick and notes on the page.</p>
     <button id="installBtn">📲 Install the App</button>
     <div id="status">Preparing the install…</div>
+
+    <div class="warn" id="webviewWarn">
+      <strong>This link is open inside another app</strong> (like WhatsApp), and apps cannot be installed from here. Do this:
+      <ol>
+        <li>Tap the <strong>⋮ menu</strong> at the top corner</li>
+        <li>Tap <strong>“Open in Chrome”</strong> (or “Open in browser”)</li>
+        <li>Then tap the <strong>Install</strong> button on this page</li>
+      </ol>
+      <span class="ur">Ye link WhatsApp ke andar khula hai — yahan se install nahi hoga. Upar ⋮ dabao, “Open in Chrome” karo, phir Install dabao.</span>
+    </div>
+
+    <div class="warn" id="iosWarn">
+      <strong>On iPhone, install works like this:</strong>
+      <ol>
+        <li>Tap the <strong>Share</strong> button at the bottom</li>
+        <li>Tap <strong>“Add to Home Screen”</strong></li>
+        <li>Tap <strong>Add</strong> — done</li>
+      </ol>
+    </div>
+
     <div id="openRow"><a href="./">Open Kitab Reader →</a></div>
   </div>
 <script>
@@ -35,6 +59,9 @@
   var statusEl = document.getElementById('status');
   var btn = document.getElementById('installBtn');
   var openRow = document.getElementById('openRow');
+  var ua = navigator.userAgent || '';
+  var isIOS = /iphone|ipad|ipod/i.test(ua);
+  var isWebview = /WhatsApp|Instagram|FBAN|FBAV|;\s*wv\)/i.test(ua);
 
   function setStatus(t) { statusEl.textContent = t; }
 
@@ -46,6 +73,13 @@
     btn.style.display = 'none';
     setStatus('The app is already installed on this phone.');
     openRow.style.display = 'block';
+  } else if (isWebview) {
+    document.getElementById('webviewWarn').style.display = 'block';
+    setStatus('Follow the steps below first — then install.');
+  } else if (isIOS) {
+    document.getElementById('iosWarn').style.display = 'block';
+    btn.style.display = 'none';
+    setStatus('Follow the steps below to add the app.');
   }
 
   window.addEventListener('beforeinstallprompt', function (e) {
@@ -76,13 +110,17 @@
     } else if (isStandalone()) {
       setStatus('The app is already installed on this phone.');
       openRow.style.display = 'block';
+    } else if (isWebview) {
+      document.getElementById('webviewWarn').style.display = 'block';
+      setStatus('This page is open inside another app — follow the steps below first.');
+      document.getElementById('webviewWarn').scrollIntoView({ block: 'nearest' });
     } else {
       setStatus('Open this link in the Chrome browser, then tap Install.');
     }
   });
 
   setTimeout(function () {
-    if (!deferred && !isStandalone()) setStatus('If no install box appears, open this link in the Chrome browser and tap Install.');
+    if (!deferred && !isStandalone() && !isWebview && !isIOS) setStatus('If no install box appears, open this link in the Chrome browser and tap Install.');
   }, 4000);
 
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
