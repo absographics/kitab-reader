@@ -329,7 +329,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '2.7';
+const APP_VERSION = '2.8';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -1186,7 +1186,13 @@ function layoutPdfPages(){
     p.wrap.style.width = w + 'px';
     if (p.aspect) p.wrap.style.height = (w * p.aspect) + 'px';
   });
-  Object.keys(S.pageEls).forEach(n => { if (S.pageEls[n].rendered) { S.pageEls[n].rendered = false; renderPdfPage(+n); } });
+  /* Re-render only when the size really changed (>6%): small zooms just let
+     CSS stretch the existing bitmap — instant, and the page never blanks.
+     Bigger jumps re-render, current page first. */
+  Object.keys(S.pageEls)
+    .filter(n => S.pageEls[n].rendered && (!S.pageEls[n].renderedAtW || Math.abs(w - S.pageEls[n].renderedAtW) / S.pageEls[n].renderedAtW > 0.06))
+    .sort((a, b) => Math.abs(a - S.curPage) - Math.abs(b - S.curPage))
+    .forEach(n => { S.pageEls[n].rendered = false; renderPdfPage(+n); });
 }
 /* Release a far-away page's bitmaps so a long book never fills the phone's memory.
    The wrap keeps its exact height, so scrolling never jumps. */
@@ -1233,13 +1239,21 @@ async function renderPdfPage(n){
        blowing the phone's memory on giant canvases */
     const dpr = Math.min((window.devicePixelRatio || 1) * 1.5, 4, 2400 / Math.max(cssW, 1));
     const vp = page.getViewport({ scale: scale * dpr });
-    P.pdfCv.width = vp.width; P.pdfCv.height = vp.height;
     /* annotation layer renders at native screen sharpness — much lighter than the page layer */
     const aDpr = Math.min(window.devicePixelRatio || 1, 3);
     P.annoCv.width = Math.round(cssW * aDpr); P.annoCv.height = Math.round(cssW * P.aspect * aDpr);
-    await page.render({ canvasContext: P.pdfCv.getContext('2d'), viewport: vp }).promise;
-    if (P.renderId !== rid) { P.pdfCv.width = 1; P.pdfCv.height = 1; P.annoCv.width = 1; P.annoCv.height = 1; return; }
-    bakePageColor(P.pdfCv);
+    /* Render OFFSCREEN first, then swap in one step. Drawing straight into
+       the visible canvas clears it the moment the render starts, so on a
+       slow phone every zoom left the pages white until pdf.js finished —
+       the "blank ho jata hai" bug. The old page now stays on screen until
+       the new one is fully ready. */
+    const tmp = document.createElement('canvas'); tmp.width = vp.width; tmp.height = vp.height;
+    await page.render({ canvasContext: tmp.getContext('2d'), viewport: vp }).promise;
+    if (P.renderId !== rid) return; // freed while rendering — keep the old bitmap untouched
+    bakePageColor(tmp);
+    P.pdfCv.width = vp.width; P.pdfCv.height = vp.height;
+    P.pdfCv.getContext('2d').drawImage(tmp, 0, 0);
+    P.renderedAtW = cssW;
     drawAnnoPage(n);
     drawNoteMarkers(n);
     prunePages();
