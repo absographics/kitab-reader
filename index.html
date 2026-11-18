@@ -103,7 +103,7 @@ body.console #rTop{background:#000; border-bottom:1px solid var(--line);}
 #rTop .rt{flex:1; font-size:15.5px; font-weight:bold; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
 #rTop .pg{font-size:13px; opacity:.9; white-space:nowrap;}
 #rBody{flex:1; overflow-y:auto; position:relative; scroll-behavior:auto; -webkit-overflow-scrolling:touch;}
-#pdfPages{padding:60px 0 88px;}
+#pdfPages{padding:60px 0 88px; touch-action:pan-x pan-y;}
 .pgWrap{position:relative; margin:0 auto 14px; background:#fff; box-shadow:0 2px 10px rgba(0,0,0,.28); line-height:0;}
 .pgWrap canvas.pdfCv{display:block; width:100%; height:auto;}
 .pgWrap canvas.annoCv{position:absolute; inset:0; width:100%; height:100%; pointer-events:none; touch-action:none;}
@@ -328,7 +328,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '2.5';
+const APP_VERSION = '2.6';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -1210,7 +1210,9 @@ async function renderPdfPage(n){
     const cssW = P.wrap.clientWidth || Math.min($('#rBody').clientWidth - 14, 920);
     P.wrap.style.height = (cssW * P.aspect) + 'px';
     const scale = cssW / base.width;
-    const dpr = Math.min((window.devicePixelRatio || 1) * 1.5, 4);
+    /* cap the bitmap at 2400px wide — deep zooms stay crisp without
+       blowing the phone's memory on giant canvases */
+    const dpr = Math.min((window.devicePixelRatio || 1) * 1.5, 4, 2400 / Math.max(cssW, 1));
     const vp = page.getViewport({ scale: scale * dpr });
     P.pdfCv.width = vp.width; P.pdfCv.height = vp.height;
     /* annotation layer renders at native screen sharpness — much lighter than the page layer */
@@ -1573,34 +1575,47 @@ function setAnnoMode(on){
     $('#reader').classList.toggle('uihide');
   }, { passive: true });
 })();
-/* Pinch to zoom (PDF): two fingers spread or squeeze; a live preview follows
-   the fingers and the zoom settles exactly where they let go, anchored on
-   the spot between them. The menu Zoom stays as the tap alternative. */
+/* Pinch to zoom (PDF), reader-grade: the page sticks to the fingers — it
+   grows AND travels with the midpoint of the two fingers — then settles at
+   the new scale with the touched spot landing exactly under the fingers
+   (anchored on both axes, no sideways jump). The browser's own pinch-zoom
+   is switched off for the pages (CSS touch-action + the app shell), so the
+   two never fight. The menu Zoom stays as the tap alternative. */
 (function(){
   const host = $('#pdfPages'); if (!host) return;
   const pts = new Map();
   let pinch = null;
   const zb = $('#zoomBubble');
+  const mid = () => { const [a, b] = [...pts.values()]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 }; };
   host.addEventListener('pointerdown', (e) => {
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pts.size === 2 && S.cur && S.cur.format === 'pdf' && !document.body.classList.contains('annotating')) {
-      const [a, b] = [...pts.values()];
       const rb = $('#rBody'), r = rb.getBoundingClientRect();
-      pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, scale0: S.pdfScale, target: S.pdfScale,
-                cx: (a.x + b.x) / 2 - r.left + rb.scrollLeft, cy: (a.y + b.y) / 2 - r.top + rb.scrollTop,
-                vx: (a.x + b.x) / 2 - r.left, vy: (a.y + b.y) / 2 - r.top };
+      const m = mid();
+      const ax = m.x - r.left + rb.scrollLeft, ay = m.y - r.top + rb.scrollTop;
+      let page = S.curPage, fx = 0.5, fy = 0;
+      for (let n = 1; n <= S.pdf.numPages; n++) {
+        const P = S.pageEls[n]; if (!P) continue;
+        const w = P.wrap;
+        if (ay < w.offsetTop) { page = n; fx = Math.min(1, Math.max(0, (ax - w.offsetLeft) / (w.offsetWidth || 1))); fy = 0; break; }
+        if (ay <= w.offsetTop + w.offsetHeight) { page = n; fx = Math.min(1, Math.max(0, (ax - w.offsetLeft) / (w.offsetWidth || 1))); fy = Math.min(1, Math.max(0, (ay - w.offsetTop) / (w.offsetHeight || 1))); break; }
+        page = n; fx = Math.min(1, Math.max(0, (ax - w.offsetLeft) / (w.offsetWidth || 1))); fy = 1;
+      }
+      pinch = { d0: m.d, scale0: S.pdfScale, target: S.pdfScale, ax, ay, page, fx, fy,
+                mx0: m.x - r.left, my0: m.y - r.top, mx: m.x - r.left, my: m.y - r.top };
       S.pinching = true;
+      host.style.transformOrigin = ax + 'px ' + ay + 'px';
     }
   });
   host.addEventListener('pointermove', (e) => {
     if (!pts.has(e.pointerId)) return;
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pinch && pts.size === 2) {
-      const [a, b] = [...pts.values()];
-      const ratio = Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0;
-      pinch.target = Math.min(3, Math.max(0.85, pinch.scale0 * ratio));
-      host.style.transformOrigin = pinch.cx + 'px ' + pinch.cy + 'px';
-      host.style.transform = 'scale(' + (pinch.target / pinch.scale0) + ')';
+      const rb = $('#rBody'), r = rb.getBoundingClientRect();
+      const m = mid();
+      pinch.mx = m.x - r.left; pinch.my = m.y - r.top;
+      pinch.target = Math.min(3, Math.max(0.85, pinch.scale0 * (m.d / pinch.d0)));
+      host.style.transform = 'translate(' + (pinch.mx - pinch.mx0) + 'px,' + (pinch.my - pinch.my0) + 'px) scale(' + (pinch.target / pinch.scale0) + ')';
       if (zb) { zb.textContent = Math.round(pinch.target * 100) + '%'; zb.classList.remove('hidden'); }
     }
   });
@@ -1611,21 +1626,14 @@ function setAnnoMode(on){
     host.style.transform = ''; host.style.transformOrigin = '';
     if (zb) zb.classList.add('hidden');
     if (Math.abs(p.target - p.scale0) <= 0.01) return;
-    let page = S.curPage, frac = 0;
-    for (let n = 1; n <= S.pdf.numPages; n++) {
-      const P = S.pageEls[n]; if (!P) continue;
-      if (p.cy < P.wrap.offsetTop) { page = n; frac = 0; break; }
-      if (p.cy <= P.wrap.offsetTop + P.wrap.offsetHeight) { page = n; frac = (p.cy - P.wrap.offsetTop) / (P.wrap.offsetHeight || 1); break; }
-      page = n; frac = 1;
-    }
     S.pdfScale = p.target;
     layoutPdfPages();
     requestAnimationFrame(() => {
-      const P = S.pageEls[page]; if (!P) return;
-      const rb = $('#rBody');
-      rb.scrollTop = P.wrap.offsetTop + frac * P.wrap.offsetHeight - p.vy;
-      rb.scrollLeft = P.wrap.offsetLeft + P.wrap.offsetWidth / 2 - rb.clientWidth / 2;
-      S.curPage = page; updatePageInfo();
+      const P = S.pageEls[p.page]; if (!P) return;
+      const rb = $('#rBody'), w = P.wrap;
+      rb.scrollLeft = w.offsetLeft + p.fx * w.offsetWidth - p.mx;
+      rb.scrollTop = w.offsetTop + p.fy * w.offsetHeight - p.my;
+      S.curPage = p.page; updatePageInfo();
     });
   };
   host.addEventListener('pointerup', endPinch);
