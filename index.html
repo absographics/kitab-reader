@@ -325,7 +325,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -513,6 +513,7 @@ function renderLibrary(){
   ensureGridSentinel();
   $('#libEmpty').classList.toggle('hidden', S.books.length > 0);
   $$('#continueSec [data-open]').forEach(el => bindBookEl(el));
+  queueMissingCovers();
 }
 function bindBookEl(el){
   el.addEventListener('click', () => openBook(el.dataset.open));
@@ -833,6 +834,64 @@ async function downloadPicked(token, idsCsv){
     toast(added === 1 ? '1 book arrived from Drive' : added + ' books arrived from Drive', 4500);
   }
   if (failed) toast(failed + ' picked book' + (failed === 1 ? '' : 's') + ' could not be downloaded');
+}
+
+/* ================= COVERS FOR EVERY BOOK =================
+   Every book shows its real first page, not just the ones already opened
+   (abso's ask). A quiet background job walks the library smallest-first and
+   paints each missing cover; it pauses while a book is open for reading. */
+let coverJobRunning = false;
+async function makeCover(b){
+  const blob = await getBookBlob(b.id);
+  if (!blob) return;
+  const buf = await blob.arrayBuffer();
+  if (b.format === 'pdf') {
+    const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
+    try {
+      const md = await pdf.getMetadata().catch(() => null);
+      if (md && md.info && md.info.Author && !b.author) b.author = md.info.Author;
+      const page = await pdf.getPage(1);
+      const base = page.getViewport({ scale: 1 });
+      const vp = page.getViewport({ scale: 190 / base.width });
+      const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
+      await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+      b.cover = cv.toDataURL('image/jpeg', 0.72);
+    } finally { try { pdf.destroy(); } catch (e) {} }
+  } else if (b.format === 'epub') {
+    if (!window.ePub) return;
+    const bk = ePub(buf.slice(0));
+    try {
+      await bk.ready;
+      const cov = await bk.coverUrl().catch(() => null);
+      if (cov) {
+        const bl = await (await fetch(cov)).blob();
+        b.cover = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(bl); });
+      }
+      const meta = await bk.loaded.metadata.catch(() => null);
+      if (meta && meta.creator && !b.author) b.author = meta.creator;
+    } finally { try { bk.destroy(); } catch (e) {} }
+  }
+  if (b.cover) {
+    b.metaDone = true;
+    await DB.put('books', b);
+    const covEl = document.querySelector('.book[data-open="' + b.id + '"] .cov');
+    if (covEl) covEl.innerHTML = '<img src="' + b.cover + '" alt=""><span class="fmt">' + b.format.toUpperCase() + '</span>';
+  }
+}
+async function queueMissingCovers(){
+  if (coverJobRunning) return;
+  const todo = S.books.filter(b => (b.format === 'pdf' || b.format === 'epub') && !b.cover)
+    .sort((a, b) => (a.size || 0) - (b.size || 0));
+  if (!todo.length) return;
+  coverJobRunning = true;
+  try {
+    for (const b of todo) {
+      if (S.cur) break; // reading — covers resume when the book is closed
+      if (b.cover) continue;
+      try { await makeCover(b); } catch (e) { console.warn('cover failed', b.name, e); }
+      await new Promise(r => setTimeout(r, 80));
+    }
+  } finally { coverJobRunning = false; }
 }
 
 /* fill in author/cover once, when the book is first opened (never the title) */
