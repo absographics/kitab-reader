@@ -1,4 +1,4 @@
-const CACHE = 'kitab-reader-v25';
+const CACHE = 'kitab-reader-v26';
 
 const SHELL = [
   './',
