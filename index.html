@@ -116,6 +116,7 @@ body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
 #sliderWrap{flex:1; position:relative; display:flex; align-items:center;}
 #pageSlider{width:100%; accent-color:var(--teal);}
 #pgBubble{position:absolute; bottom:calc(100% + 14px); transform:translateX(-50%); background:var(--teal); color:#fff; padding:5px 12px; border-radius:14px; font-size:13.5px; font-weight:bold; white-space:nowrap; pointer-events:none; box-shadow:0 3px 10px rgba(0,0,0,.3); z-index:8;}
+#zoomBubble{position:absolute; top:64px; left:50%; transform:translateX(-50%); background:rgba(13,84,74,.92); color:#fff; padding:6px 16px; border-radius:16px; font-size:15px; font-weight:bold; pointer-events:none; box-shadow:0 3px 10px rgba(0,0,0,.3); z-index:9;}
 #epubHost{position:absolute; inset:0;}
 #txtHost{padding:22px 20px 60px; max-width:760px; margin:0 auto; white-space:pre-wrap; line-height:1.75; font-size:18px;}
 
@@ -208,6 +209,7 @@ body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
     </div>
     <button id="nextPg">Next ›</button>
   </div>
+  <div id="zoomBubble" class="hidden">100%</div>
 </div>
 
 <!-- generic sheet -->
@@ -326,7 +328,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '2.4';
+const APP_VERSION = '2.5';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -852,23 +854,45 @@ async function downloadPicked(token, idsCsv){
    (abso's ask). A quiet background job walks the library smallest-first and
    paints each missing cover; it pauses while a book is open for reading. */
 let coverJobRunning = false;
+const coverTried = new Set();
+async function fillPdfCover(b, pdf){
+  const md = await pdf.getMetadata().catch(() => null);
+  if (md && md.info && md.info.Author && !b.author) b.author = md.info.Author;
+  const page = await pdf.getPage(1);
+  const base = page.getViewport({ scale: 1 });
+  const vp = page.getViewport({ scale: 190 / base.width });
+  const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
+  await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+  b.cover = cv.toDataURL('image/jpeg', 0.72);
+}
 async function makeCover(b){
   const blob = await getBookBlob(b.id);
   if (!blob) return;
-  const buf = await blob.arrayBuffer();
   if (b.format === 'pdf') {
-    const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
+    /* First try reading only the slices pdf.js actually needs — a 200 MB
+       book then costs a few hundred KB of reading, not the whole file.
+       Any failure falls back to the plain whole-file read. */
+    let done = false;
     try {
-      const md = await pdf.getMetadata().catch(() => null);
-      if (md && md.info && md.info.Author && !b.author) b.author = md.info.Author;
-      const page = await pdf.getPage(1);
-      const base = page.getViewport({ scale: 1 });
-      const vp = page.getViewport({ scale: 190 / base.width });
-      const cv = document.createElement('canvas'); cv.width = vp.width; cv.height = vp.height;
-      await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
-      b.cover = cv.toDataURL('image/jpeg', 0.72);
-    } finally { try { pdf.destroy(); } catch (e) {} }
+      const transport = new pdfjsLib.PDFDataRangeTransport(blob.size, null);
+      transport.requestDataRange = (begin, end) => {
+        blob.slice(begin, end).arrayBuffer()
+          .then(buf2 => transport.onDataRange(begin, buf2))
+          .catch(() => {});
+      };
+      transport.transportReady();
+      const pdf = await pdfjsLib.getDocument({ range: transport, disableAutoFetch: true, disableStream: true }).promise;
+      try { await fillPdfCover(b, pdf); done = !!b.cover; }
+      finally { try { pdf.destroy(); } catch (e) {} }
+    } catch (e) { /* fall through to the whole-file read */ }
+    if (!done) {
+      const buf = await blob.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buf.slice(0) }).promise;
+      try { await fillPdfCover(b, pdf); }
+      finally { try { pdf.destroy(); } catch (e) {} }
+    }
   } else if (b.format === 'epub') {
+    const buf = await blob.arrayBuffer();
     if (!window.ePub) return;
     const bk = ePub(buf.slice(0));
     try {
@@ -891,7 +915,7 @@ async function makeCover(b){
 }
 async function queueMissingCovers(){
   if (coverJobRunning) return;
-  const todo = S.books.filter(b => (b.format === 'pdf' || b.format === 'epub') && !b.cover)
+  const todo = S.books.filter(b => (b.format === 'pdf' || b.format === 'epub') && !b.cover && !coverTried.has(b.id))
     .sort((a, b) => (a.size || 0) - (b.size || 0));
   if (!todo.length) return;
   coverJobRunning = true;
@@ -899,7 +923,10 @@ async function queueMissingCovers(){
     for (const b of todo) {
       if (S.cur) break; // reading — covers resume when the book is closed
       if (b.cover) continue;
-      try { await makeCover(b); } catch (e) { console.warn('cover failed', b.name, e); }
+      coverTried.add(b.id);
+      try {
+        await Promise.race([makeCover(b), new Promise((_, rej) => setTimeout(() => rej(new Error('cover timeout')), 30000))]);
+      } catch (e) { console.warn('cover failed', b.name, e); }
       await new Promise(r => setTimeout(r, 80));
     }
   } finally { coverJobRunning = false; }
@@ -1382,7 +1409,7 @@ $('#rMenu').addEventListener('click', async () => {
   sheetRows(rows);
 });
 function zoomSheet(){
-  const rows = [0.85, 1, 1.25, 1.5, 2].map(z => ({ ic: '🔍', label: Math.round(z * 100) + '%', ck: S.pdfScale === z, fn: () => {
+  const rows = [0.85, 1, 1.25, 1.5, 2, 3].map(z => ({ ic: '🔍', label: Math.round(z * 100) + '%', ck: S.pdfScale === z, fn: () => {
     S.pdfScale = z; if (S.cur && S.cur.format === 'pdf') { const keep = S.curPage; layoutPdfPages(); setTimeout(() => scrollToPage(keep, 'auto'), 60); }
     if (S.cur && S.cur.format === 'txt') { /* txt uses font size */ }
   }}));
@@ -1539,11 +1566,70 @@ function setAnnoMode(on){
     const moved = Math.hypot(e.clientX - pd.x, e.clientY - pd.y), dt = Date.now() - pd.t;
     pd = null;
     if (moved > 12 || dt > 350) return;
+    if (S.pinching || (S.pinchedAt && Date.now() - S.pinchedAt < 600)) return;
     if (document.body.classList.contains('annotating')) return;
     if ($('#sheetWrap').classList.contains('open')) return;
     if (e.target.closest('button, a, input, .noteDot')) return;
     $('#reader').classList.toggle('uihide');
   }, { passive: true });
+})();
+/* Pinch to zoom (PDF): two fingers spread or squeeze; a live preview follows
+   the fingers and the zoom settles exactly where they let go, anchored on
+   the spot between them. The menu Zoom stays as the tap alternative. */
+(function(){
+  const host = $('#pdfPages'); if (!host) return;
+  const pts = new Map();
+  let pinch = null;
+  const zb = $('#zoomBubble');
+  host.addEventListener('pointerdown', (e) => {
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 2 && S.cur && S.cur.format === 'pdf' && !document.body.classList.contains('annotating')) {
+      const [a, b] = [...pts.values()];
+      const rb = $('#rBody'), r = rb.getBoundingClientRect();
+      pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, scale0: S.pdfScale, target: S.pdfScale,
+                cx: (a.x + b.x) / 2 - r.left + rb.scrollLeft, cy: (a.y + b.y) / 2 - r.top + rb.scrollTop,
+                vx: (a.x + b.x) / 2 - r.left, vy: (a.y + b.y) / 2 - r.top };
+      S.pinching = true;
+    }
+  });
+  host.addEventListener('pointermove', (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      const ratio = Math.hypot(a.x - b.x, a.y - b.y) / pinch.d0;
+      pinch.target = Math.min(3, Math.max(0.85, pinch.scale0 * ratio));
+      host.style.transformOrigin = pinch.cx + 'px ' + pinch.cy + 'px';
+      host.style.transform = 'scale(' + (pinch.target / pinch.scale0) + ')';
+      if (zb) { zb.textContent = Math.round(pinch.target * 100) + '%'; zb.classList.remove('hidden'); }
+    }
+  });
+  const endPinch = (e) => {
+    pts.delete(e.pointerId);
+    if (!pinch || pts.size >= 2) return;
+    const p = pinch; pinch = null; S.pinching = false; S.pinchedAt = Date.now();
+    host.style.transform = ''; host.style.transformOrigin = '';
+    if (zb) zb.classList.add('hidden');
+    if (Math.abs(p.target - p.scale0) <= 0.01) return;
+    let page = S.curPage, frac = 0;
+    for (let n = 1; n <= S.pdf.numPages; n++) {
+      const P = S.pageEls[n]; if (!P) continue;
+      if (p.cy < P.wrap.offsetTop) { page = n; frac = 0; break; }
+      if (p.cy <= P.wrap.offsetTop + P.wrap.offsetHeight) { page = n; frac = (p.cy - P.wrap.offsetTop) / (P.wrap.offsetHeight || 1); break; }
+      page = n; frac = 1;
+    }
+    S.pdfScale = p.target;
+    layoutPdfPages();
+    requestAnimationFrame(() => {
+      const P = S.pageEls[page]; if (!P) return;
+      const rb = $('#rBody');
+      rb.scrollTop = P.wrap.offsetTop + frac * P.wrap.offsetHeight - p.vy;
+      rb.scrollLeft = P.wrap.offsetLeft + P.wrap.offsetWidth / 2 - rb.clientWidth / 2;
+      S.curPage = page; updatePageInfo();
+    });
+  };
+  host.addEventListener('pointerup', endPinch);
+  host.addEventListener('pointercancel', endPinch);
 })();
 $('#rAnnotate').addEventListener('click', () => setAnnoMode(!S.anno.on));
 
