@@ -113,7 +113,9 @@ body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
 .pgNum{text-align:center; font-size:12px; color:var(--mut); margin:-6px 0 12px; line-height:1;}
 #rBot{background:var(--card); border-top:1px solid var(--line); padding:8px 12px calc(8px + env(safe-area-inset-bottom)); display:flex; align-items:center; gap:10px; z-index:6; position:absolute; bottom:0; left:0; right:0; transition:transform .25s ease, opacity .25s ease;}
 #rBot button{background:var(--chip); border:none; border-radius:18px; padding:8px 14px; font-size:14px; color:var(--ink);}
-#pageSlider{flex:1; accent-color:var(--teal);}
+#sliderWrap{flex:1; position:relative; display:flex; align-items:center;}
+#pageSlider{width:100%; accent-color:var(--teal);}
+#pgBubble{position:absolute; bottom:calc(100% + 14px); transform:translateX(-50%); background:var(--teal); color:#fff; padding:5px 12px; border-radius:14px; font-size:13.5px; font-weight:bold; white-space:nowrap; pointer-events:none; box-shadow:0 3px 10px rgba(0,0,0,.3); z-index:8;}
 #epubHost{position:absolute; inset:0;}
 #txtHost{padding:22px 20px 60px; max-width:760px; margin:0 auto; white-space:pre-wrap; line-height:1.75; font-size:18px;}
 
@@ -199,7 +201,10 @@ body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
   <div id="annoBar"></div>
   <div id="rBot">
     <button id="prevPg">‹ Prev</button>
-    <input type="range" id="pageSlider" min="1" max="1" value="1">
+    <div id="sliderWrap">
+      <input type="range" id="pageSlider" min="1" max="1" value="1">
+      <div id="pgBubble" class="hidden">1 / 1</div>
+    </div>
     <button id="nextPg">Next ›</button>
   </div>
 </div>
@@ -320,7 +325,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -1038,7 +1043,9 @@ function updatePageInfo(){
   const b = S.cur; if (!b) return;
   if (b.format === 'pdf' && S.pdf) {
     $('#rPageInfo').textContent = S.curPage + ' / ' + S.pdf.numPages;
-    $('#pageSlider').value = S.curPage;
+    /* While the reader is scrubbing the slider, the thumb belongs to their
+       finger — never drag it back from the scroll position. */
+    if (!S.scrubbing) $('#pageSlider').value = S.curPage;
   }
 }
 $('#rBody').addEventListener('scroll', () => {
@@ -1058,12 +1065,45 @@ $('#rBody').addEventListener('scroll', () => {
     clearTimeout(S.saveTimer); S.saveTimer = setTimeout(saveProgress, 600);
   }
 }, { passive: true });
+/* The bottom slider is a scrubber: while the finger drags, a bubble shows
+   the page and NOTHING scrolls; on release the book jumps there in one exact
+   step. (The old way scrolled live and the scroll handler kept pulling the
+   thumb back — the aage-peeche jitter abso reported.) */
+function sliderBubble(){
+  const s = $('#pageSlider'), b = $('#pgBubble'); if (!s || !b) return;
+  const max = +s.max || 1, v = +s.value || 1;
+  b.textContent = 'Page ' + v + ' / ' + max;
+  const frac = max > 1 ? (v - 1) / (max - 1) : 0;
+  b.style.left = (4 + frac * 92) + '%';
+}
+$('#pageSlider').addEventListener('pointerdown', () => {
+  if (!S.cur || S.cur.format !== 'pdf') return;
+  S.scrubbing = true;
+  sliderBubble();
+  $('#pgBubble').classList.remove('hidden');
+});
 $('#pageSlider').addEventListener('input', (e) => {
   if (!S.cur) return;
-  if (S.cur.format === 'pdf') scrollToPage(+e.target.value);
-  else if (S.cur.format === 'epub' && S.epubBook && S.epubBook.locations && S.epubBook.locations.length()) {
+  if (S.cur.format === 'pdf') { sliderBubble(); return; }
+  if (S.cur.format === 'epub' && S.epubBook && S.epubBook.locations && S.epubBook.locations.length()) {
     S.rendition.display(S.epubBook.locations.cfiFromPercentage(e.target.value / 100));
   }
+});
+$('#pageSlider').addEventListener('change', (e) => {
+  if (!S.cur || S.cur.format !== 'pdf') return;
+  S.scrubbing = false;
+  $('#pgBubble').classList.add('hidden');
+  scrollToPage(+e.target.value, 'auto');
+});
+$('#pageSlider').addEventListener('pointerup', () => {
+  /* Safety: if 'change' does not follow (a tap without a drag), end the
+     scrub here so the slider never gets stuck in scrub mode. */
+  setTimeout(() => {
+    if (!S.scrubbing) return;
+    S.scrubbing = false;
+    $('#pgBubble').classList.add('hidden');
+    if (S.cur && S.cur.format === 'pdf') scrollToPage(+$('#pageSlider').value, 'auto');
+  }, 80);
 });
 $('#prevPg').addEventListener('click', () => {
   if (!S.cur) return;
