@@ -76,7 +76,11 @@ body.night .ditem.sel, body.console .ditem.sel{color:var(--gold);}
 .dsec{display:flex; align-items:center; justify-content:space-between; padding:10px 18px 2px; font-size:11.5px; letter-spacing:1.4px; color:var(--mut); font-weight:bold;}
 .dsec button{background:var(--chip); border:none; color:var(--ink); border-radius:12px; padding:4px 12px; font-size:13.5px; cursor:pointer; letter-spacing:0;}
 .ditem .cnt{margin-left:auto; font-size:12.5px; color:var(--mut); font-weight:normal;}
-#reader.uihide #rTop, #reader.uihide #rBot{display:none;}
+/* Fullscreen: the bars are overlays that slide away — the page itself never
+   moves, not even a pixel (abso's rule). */
+#reader.uihide #rTop{transform:translateY(-105%); opacity:0; pointer-events:none;}
+#reader.uihide #rBot{transform:translateY(105%); opacity:0; pointer-events:none;}
+body.annotating #rBot{opacity:0; pointer-events:none;}
 
 /* sheets */
 .sheetWrap{position:fixed; inset:0; z-index:40; display:none;}
@@ -94,12 +98,12 @@ body.night .srow .ck, body.console .srow .ck{color:var(--gold);}
 /* ---------- Reader ---------- */
 #reader{position:fixed; inset:0; background:var(--bg); display:none; flex-direction:column; z-index:10;}
 #reader.open{display:flex;}
-#rTop{display:flex; align-items:center; gap:4px; padding:8px 8px; background:var(--teal); color:#fff; z-index:6;}
+#rTop{display:flex; align-items:center; gap:4px; padding:8px 8px; background:var(--teal); color:#fff; z-index:6; position:absolute; top:0; left:0; right:0; transition:transform .25s ease, opacity .25s ease;}
 body.console #rTop{background:#000; border-bottom:1px solid var(--line);}
 #rTop .rt{flex:1; font-size:15.5px; font-weight:bold; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
 #rTop .pg{font-size:13px; opacity:.9; white-space:nowrap;}
 #rBody{flex:1; overflow-y:auto; position:relative; scroll-behavior:auto; -webkit-overflow-scrolling:touch;}
-#pdfPages{padding:10px 0 30px;}
+#pdfPages{padding:60px 0 88px;}
 .pgWrap{position:relative; margin:0 auto 14px; background:#fff; box-shadow:0 2px 10px rgba(0,0,0,.28); line-height:0;}
 .pgWrap canvas.pdfCv{display:block; width:100%; height:auto;}
 .pgWrap canvas.annoCv{position:absolute; inset:0; width:100%; height:100%; pointer-events:none; touch-action:none;}
@@ -107,7 +111,7 @@ body.annotating .pgWrap canvas.annoCv{pointer-events:auto;}
 body.pdfNight .pgWrap canvas.pdfCv{filter:invert(0.94) hue-rotate(180deg);}
 body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
 .pgNum{text-align:center; font-size:12px; color:var(--mut); margin:-6px 0 12px; line-height:1;}
-#rBot{background:var(--card); border-top:1px solid var(--line); padding:8px 12px calc(8px + env(safe-area-inset-bottom)); display:flex; align-items:center; gap:10px; z-index:6;}
+#rBot{background:var(--card); border-top:1px solid var(--line); padding:8px 12px calc(8px + env(safe-area-inset-bottom)); display:flex; align-items:center; gap:10px; z-index:6; position:absolute; bottom:0; left:0; right:0; transition:transform .25s ease, opacity .25s ease;}
 #rBot button{background:var(--chip); border:none; border-radius:18px; padding:8px 14px; font-size:14px; color:var(--ink);}
 #pageSlider{flex:1; accent-color:var(--teal);}
 #epubHost{position:absolute; inset:0;}
@@ -146,6 +150,7 @@ body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
 <!-- ================= LIBRARY ================= -->
 <div id="library">
   <div class="topbar">
+    <button class="iconbtn dmBtn" aria-label="Dark mode">🌙</button>
     <button class="iconbtn" id="menuBtn" aria-label="Menu">☰</button>
     <div class="ttl">Kitab Reader</div>
     <button class="iconbtn hidden" id="installBtn" aria-label="Install app">⬇️</button>
@@ -183,6 +188,7 @@ body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
     <div class="pg" id="rPageInfo"></div>
     <button class="iconbtn" id="rBookmark" aria-label="Bookmark">🔖</button>
     <button class="iconbtn hidden" id="rAnnotate" aria-label="Annotate">✏️</button>
+    <button class="iconbtn dmBtn" aria-label="Dark mode">🌙</button>
     <button class="iconbtn" id="rMenu" aria-label="Reader menu">⋮</button>
   </div>
   <div id="rBody">
@@ -314,7 +320,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.1';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -335,10 +341,17 @@ function saveSettings(){ localStorage.setItem('kitab_settings', JSON.stringify(S
 function applyTheme(){
   document.body.classList.remove('night','sepia','console');
   if (S.settings.theme !== 'day') document.body.classList.add(S.settings.theme);
-  document.body.classList.toggle('pdfNight', !!S.settings.pdfNight);
-  document.body.classList.toggle('pdfSepia', !!S.settings.pdfSepia);
+  /* Dark app = dark PDF too (abso's rule): the night theme turns the pages
+     dark on its own; the Settings page-color can still force it in day mode. */
+  document.body.classList.toggle('pdfNight', !!S.settings.pdfNight || S.settings.theme === 'night');
+  document.body.classList.toggle('pdfSepia', !!S.settings.pdfSepia && S.settings.theme !== 'night');
   $('#brightVeil').style.opacity = S.settings.brightness || 0;
+  $$('.dmBtn').forEach(b => b.textContent = S.settings.theme === 'night' ? '☀️' : '🌙');
   if (S.rendition) applyEpubTheme();
+}
+function toggleDark(){
+  S.settings.theme = (S.settings.theme === 'night') ? 'day' : 'night';
+  saveSettings(); applyTheme();
 }
 
 /* ---------------- Sheets ---------------- */
@@ -447,6 +460,7 @@ function collectionManageSheet(c){
 function openDrawer(){ $('#drawer').classList.add('open'); $('#scrim').classList.add('open'); }
 function closeDrawer(){ $('#drawer').classList.remove('open'); $('#scrim').classList.remove('open'); }
 $('#menuBtn').addEventListener('click', openDrawer);
+$$('.dmBtn').forEach(b => b.addEventListener('click', toggleDark));
 $('#scrim').addEventListener('click', closeDrawer);
 
 function viewBooks(){
@@ -1217,9 +1231,9 @@ function openSettings(){
       <input type="range" id="setBright" min="0" max="0.75" step="0.05" value="${st.brightness}"></div>
     <div class="setRow"><label>PDF page color</label>
       <div class="themeRow">
-        <button class="themeBtn ${!st.pdfNight && !st.pdfSepia ? 'sel':''}" data-pm="normal">Normal</button>
-        <button class="themeBtn ${st.pdfSepia ? 'sel':''}" data-pm="sepia">Sepia</button>
-        <button class="themeBtn ${st.pdfNight ? 'sel':''}" data-pm="night">Night</button>
+        <button class="themeBtn ${!st.pdfNight && !st.pdfSepia && st.theme !== 'night' ? 'sel':''}" data-pm="normal">Normal</button>
+        <button class="themeBtn ${st.pdfSepia && st.theme !== 'night' ? 'sel':''}" data-pm="sepia">Sepia</button>
+        <button class="themeBtn ${st.pdfNight || st.theme === 'night' ? 'sel':''}" data-pm="night">Night</button>
       </div></div>
     <div class="setRow" style="color:var(--mut);font-size:13px;">Books and edits are stored only on this phone. · App version ${APP_VERSION}</div>
     <div class="setRow" id="setStorage" style="color:var(--mut);font-size:13px;">Storage: checking…</div>
