@@ -173,6 +173,7 @@ body.pdfSepia .pgWrap canvas.pdfCv{filter:sepia(0.45) brightness(0.97);}
   </div>
   <button id="fab" aria-label="Add books">+</button>
   <input type="file" id="fileInput" accept=".pdf,.epub,.txt,application/pdf,application/epub+zip,text/plain" multiple class="hidden">
+  <input type="file" id="bkFile" accept=".json,application/json" class="hidden">
 </div>
 
 <!-- drawer -->
@@ -325,7 +326,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -342,7 +343,7 @@ const S = {
   epubBook: null, rendition: null,
   saveTimer: null
 };
-function saveSettings(){ localStorage.setItem('kitab_settings', JSON.stringify(S.settings)); }
+function saveSettings(){ localStorage.setItem('kitab_settings', JSON.stringify(S.settings)); scheduleBackup(); }
 function applyTheme(){
   document.body.classList.remove('night','sepia','console');
   if (S.settings.theme !== 'day') document.body.classList.add(S.settings.theme);
@@ -513,6 +514,7 @@ function renderLibrary(){
   ensureGridSentinel();
   $('#libEmpty').classList.toggle('hidden', S.books.length > 0);
   $$('#continueSec [data-open]').forEach(el => bindBookEl(el));
+  applyPendingBookMeta();
   queueMissingCovers();
 }
 function bindBookEl(el){
@@ -577,6 +579,15 @@ function collectionSheet(b){
 
 /* adding books */
 $('#fab').addEventListener('click', () => $('#fileInput').click());
+$('#bkFile').addEventListener('change', async (e) => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  try {
+    const data = JSON.parse(await f.text());
+    if (await applyBackup(data)) { toast('Backup restored — ticks, notes and progress are back'); renderLibrary(); }
+    else toast('That file is not a Kitab Reader backup');
+  } catch (err) { toast('Could not read that backup file'); }
+});
 $('#fileInput').addEventListener('change', async (e) => {
   const files = Array.from(e.target.files || []); e.target.value = '';
   if (!files.length) return;
@@ -892,6 +903,98 @@ async function queueMissingCovers(){
       await new Promise(r => setTimeout(r, 80));
     }
   } finally { coverJobRunning = false; }
+}
+
+/* ================= AUTO BACKUP — survives uninstall =================
+   abso's rule: delete the app any number of times, everything must come
+   back exactly as it was — and the backup must never cause a hang.
+   How: every change quietly schedules ONE small JSON write (debounced,
+   throttled) to a file OUTSIDE the app (the phone's Downloads/KitabReader
+   folder, via the native bridge). On a fresh install the file is read back
+   and ticks, notes, bookmarks, progress, collections and settings return
+   on their own. Covers are not in the file — they rebuild themselves. */
+let backupTimer = null, lastBackupAt = 0, pendingBookMeta = {};
+const _dbPut = DB.put.bind(DB);
+DB.put = (store, val) => { const r = _dbPut(store, val); if (store !== 'files') scheduleBackup(); return r; };
+const _dbDel = DB.del.bind(DB);
+DB.del = (store, key) => { const r = _dbDel(store, key); scheduleBackup(); return r; };
+
+function scheduleBackup(){
+  if (backupTimer) return; // one pending write is enough
+  const delay = Math.max(3000, 15000 - (Date.now() - lastBackupAt));
+  backupTimer = setTimeout(() => { backupTimer = null; pushBackup(); }, delay);
+}
+async function buildBackup(){
+  const [annos, marks] = await Promise.all([DB.all('annotations'), DB.all('marks')]);
+  const booksMeta = {};
+  S.books.forEach(b => {
+    const m = {};
+    if (b.progress) m.progress = b.progress;
+    if (b.collection) m.collection = b.collection;
+    if (b.fav) m.fav = true;
+    if (b.toRead) m.toRead = true;
+    if (b.haveRead) m.haveRead = true;
+    if (b.lastReadAt) m.lastReadAt = b.lastReadAt;
+    if (b.author) m.author = b.author;
+    if (Object.keys(m).length) booksMeta[b.id] = m;
+  });
+  let cols = [];
+  try { cols = JSON.parse(localStorage.getItem('kitab_collections_v1') || '[]'); } catch (e) {}
+  return { v: 1, savedAt: Date.now(), annotations: annos,
+           marks: marks.map(mk => { const { mid, ...rest } = mk; return rest; }),
+           books: booksMeta, collections: cols, settings: S.settings };
+}
+async function pushBackup(){
+  lastBackupAt = Date.now();
+  try {
+    const json = JSON.stringify(await buildBackup());
+    if (window.KitabNative && typeof KitabNative.saveBackup === 'function') KitabNative.saveBackup(json);
+  } catch (e) { console.warn('backup failed', e); }
+}
+function applyPendingBookMeta(){
+  let changed = false;
+  Object.keys(pendingBookMeta).forEach(id => {
+    const b = S.books.find(x => x.id === id);
+    if (!b) return;
+    Object.assign(b, pendingBookMeta[id]);
+    _dbPut('books', b);
+    delete pendingBookMeta[id];
+    changed = true;
+  });
+  if (changed) renderLibrary();
+}
+async function applyBackup(data){
+  if (!data || data.v !== 1) return false;
+  for (const rec of (data.annotations || [])) { if (rec && rec.key) await _dbPut('annotations', rec); }
+  for (const mk of (data.marks || [])) { if (mk && mk.bookId) await _dbPut('marks', mk); }
+  let stored = [];
+  try { stored = JSON.parse(localStorage.getItem('kitab_collections_v1') || '[]'); } catch (e) {}
+  localStorage.setItem('kitab_collections_v1', JSON.stringify([...new Set([...stored, ...(data.collections || [])])]));
+  if (data.settings && !localStorage.getItem('kitab_settings')) {
+    S.settings = Object.assign({}, S.settings, data.settings);
+    localStorage.setItem('kitab_settings', JSON.stringify(S.settings));
+    applyTheme();
+  }
+  pendingBookMeta = Object.assign({}, pendingBookMeta, data.books || {});
+  applyPendingBookMeta();
+  return true;
+}
+async function maybeRestoreFromBackup(){
+  if (!window.KitabNative || typeof KitabNative.loadBackup !== 'function') return;
+  try {
+    const raw = KitabNative.loadBackup();
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    /* Restore ONLY into an empty house (a fresh install) — live data always wins. */
+    const annos = await DB.all('annotations');
+    const marks = await DB.all('marks');
+    const hasMeta = S.books.some(b => b.progress || b.collection || b.fav || b.toRead || b.haveRead);
+    if (annos.length || marks.length || hasMeta) return;
+    if (await applyBackup(data)) {
+      toast('Your backup is back — ticks, notes and progress restored');
+      renderLibrary();
+    }
+  } catch (e) { console.warn('restore failed', e); }
 }
 
 /* fill in author/cover once, when the book is first opened (never the title) */
@@ -1336,12 +1439,32 @@ function openSettings(){
       </div></div>
     <div class="setRow" style="color:var(--mut);font-size:13px;">Books and edits are stored only on this phone. · App version ${APP_VERSION}</div>
     <div class="setRow" id="setStorage" style="color:var(--mut);font-size:13px;">Storage: checking…</div>
+    <div class="setRow"><label>Backup</label>
+      <div class="themeRow">
+        <button class="themeBtn" id="bkExport">Export</button>
+        <button class="themeBtn" id="bkImport">Import</button>
+      </div>
+      <div style="color:var(--mut);font-size:12.5px;margin-top:6px;" id="bkNote"></div>
+    </div>
   `);
   if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then(est => {
     const el = $('#setStorage'); if (!el) return;
     const mb = n => Math.round((n || 0) / 1048576);
     el.textContent = 'Storage: ' + mb(est.usage) + ' MB used of ' + mb(est.quota) + ' MB available for this app';
   }).catch(() => {});
+  const bkNote = $('#bkNote');
+  if (bkNote) bkNote.textContent = (window.KitabNative && typeof KitabNative.saveBackup === 'function')
+    ? 'Automatic backup is ON: your ticks, notes, progress and collections are saved to a small file on this phone, outside the app (Downloads/KitabReader). Delete the app and reinstall — everything comes back by itself.'
+    : 'In the installed app the backup is automatic. On the web, keep a backup file with Export and bring it back with Import.';
+  const bkExp = $('#bkExport');
+  if (bkExp) bkExp.addEventListener('click', async () => {
+    const blob = new Blob([JSON.stringify(await buildBackup())], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = 'kitab-backup.json'; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  });
+  const bkImp = $('#bkImport');
+  if (bkImp) bkImp.addEventListener('click', () => $('#bkFile').click());
   $$('#sheet [data-th]').forEach(b => b.addEventListener('click', () => { S.settings.theme = b.dataset.th; saveSettings(); applyTheme(); openSettings(); }));
   $$('#sheet [data-pm]').forEach(b => b.addEventListener('click', () => {
     S.settings.pdfNight = b.dataset.pm === 'night'; S.settings.pdfSepia = b.dataset.pm === 'sepia';
@@ -1625,6 +1748,7 @@ window.addEventListener('popstate', () => {
   }
   applyTheme();
   renderLibrary();
+  maybeRestoreFromBackup();
   if (driveToken()) driveSync();
   try {
     const pk = JSON.parse(localStorage.getItem('kitab_pick') || 'null');
