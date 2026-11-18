@@ -118,6 +118,8 @@ body.annotating .pgWrap canvas.annoCv{pointer-events:auto;}
 #pageSlider{width:100%; accent-color:var(--teal);}
 #pgBubble{position:absolute; bottom:calc(100% + 14px); transform:translateX(-50%); background:var(--teal); color:#fff; padding:5px 12px; border-radius:14px; font-size:13.5px; font-weight:bold; white-space:nowrap; pointer-events:none; box-shadow:0 3px 10px rgba(0,0,0,.3); z-index:8;}
 #zoomBubble{position:absolute; top:64px; left:50%; transform:translateX(-50%); background:rgba(13,84,74,.92); color:#fff; padding:6px 16px; border-radius:16px; font-size:15px; font-weight:bold; pointer-events:none; box-shadow:0 3px 10px rgba(0,0,0,.3); z-index:9;}
+#zoomStage{position:absolute; inset:0; overflow:hidden; pointer-events:none; z-index:3;}
+.zoomStageCv{position:absolute; display:block;}
 #epubHost{position:absolute; inset:0;}
 #txtHost{padding:22px 20px 60px; max-width:760px; margin:0 auto; white-space:pre-wrap; line-height:1.75; font-size:18px;}
 
@@ -329,7 +331,7 @@ async function getBookBlob(id){
 
 /* Bump APP_VERSION on every fix, so abso can check in Settings which
    build his phone is actually running (stale-cache diagnosis). */
-const APP_VERSION = '2.8';
+const APP_VERSION = '2.9';
 /* ---------------- App state ---------------- */
 const S = {
   books: [],
@@ -1609,20 +1611,49 @@ function setAnnoMode(on){
     $('#reader').classList.toggle('uihide');
   }, { passive: true });
 })();
-/* Pinch to zoom (PDF): the fingers set the zoom (the % bubble follows), and
-   on release the pages re-render ONCE at the new scale, anchored on the
-   touched spot on both axes. Deliberately NO live transform preview: the
-   pages live in one very tall layer, and transforming a layer that tall
-   makes the phone's compositor drop it — the page goes blank (abso's
-   report, 18 Nov). One clean re-render never blanks. The browser's own
-   pinch-zoom is off for the pages (CSS touch-action + the app shell).
-   The menu Zoom stays as the tap alternative. */
+/* Pinch to zoom (PDF), smooth end to end — abso's rule: no jhatka.
+   During the gesture, a viewport-sized STAGE holding snapshots of the
+   visible pages follows the fingers (grow + travel). The real pages layer
+   is never transformed (it is far too tall — transforming it blanks the
+   screen), and it is never cleared while re-rendering (offscreen swap in
+   renderPdfPage). On release the new layout + scroll are set in the SAME
+   synchronous step, so no jumped frame is ever painted; the stage is then
+   lifted and the real pages sit exactly where the stage left them.
+   The browser's own pinch-zoom is off for the pages (CSS touch-action +
+   the app shell). The menu Zoom stays as the tap alternative. */
 (function(){
   const host = $('#pdfPages'); if (!host) return;
   const pts = new Map();
   let pinch = null;
+  let stage = null;
   const zb = $('#zoomBubble');
   const mid = () => { const [a, b] = [...pts.values()]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y) || 1 }; };
+  function buildStage(p){
+    try {
+      const reader = $('#reader'), rb = $('#rBody');
+      const rr = reader.getBoundingClientRect(), br = rb.getBoundingClientRect();
+      stage = document.createElement('div');
+      stage.id = 'zoomStage';
+      stage.style.background = getComputedStyle(rb).backgroundColor;
+      for (let n = 1; n <= S.pdf.numPages; n++) {
+        const P = S.pageEls[n]; if (!P || !P.pdfCv || P.pdfCv.width < 4) continue;
+        const wr = P.wrap.getBoundingClientRect();
+        if (wr.bottom < br.top || wr.top > br.bottom) continue;
+        const c = document.createElement('canvas');
+        c.width = P.pdfCv.width; c.height = P.pdfCv.height;
+        const cx2 = c.getContext('2d');
+        cx2.drawImage(P.pdfCv, 0, 0);
+        if (P.annoCv && P.annoCv.width > 4) cx2.drawImage(P.annoCv, 0, 0, c.width, c.height);
+        c.className = 'zoomStageCv';
+        c.style.left = (wr.left - rr.left) + 'px'; c.style.top = (wr.top - rr.top) + 'px';
+        c.style.width = wr.width + 'px'; c.style.height = wr.height + 'px';
+        stage.appendChild(c);
+      }
+      stage.style.transformOrigin = (p.mx0 + br.left - rr.left) + 'px ' + (p.my0 + br.top - rr.top) + 'px';
+      reader.insertBefore(stage, $('#rTop'));
+    } catch (e) { stage = null; }
+  }
+  function dropStage(){ if (stage) { stage.remove(); stage = null; } }
   host.addEventListener('pointerdown', (e) => {
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pts.size === 2 && S.cur && S.cur.format === 'pdf' && !document.body.classList.contains('annotating')) {
@@ -1640,6 +1671,7 @@ function setAnnoMode(on){
       pinch = { d0: m.d, scale0: S.pdfScale, target: S.pdfScale, ax, ay, page, fx, fy,
                 mx0: m.x - r.left, my0: m.y - r.top, mx: m.x - r.left, my: m.y - r.top };
       S.pinching = true;
+      buildStage(pinch);
     }
   });
   host.addEventListener('pointermove', (e) => {
@@ -1650,6 +1682,7 @@ function setAnnoMode(on){
       const m = mid();
       pinch.mx = m.x - r.left; pinch.my = m.y - r.top;
       pinch.target = Math.min(3, Math.max(0.85, pinch.scale0 * (m.d / pinch.d0)));
+      if (stage) stage.style.transform = 'translate(' + (pinch.mx - pinch.mx0) + 'px,' + (pinch.my - pinch.my0) + 'px) scale(' + (pinch.target / pinch.scale0) + ')';
       if (zb) { zb.textContent = Math.round(pinch.target * 100) + '%'; zb.classList.remove('hidden'); }
     }
   });
@@ -1658,16 +1691,19 @@ function setAnnoMode(on){
     if (!pinch || pts.size >= 2) return;
     const p = pinch; pinch = null; S.pinching = false; S.pinchedAt = Date.now();
     if (zb) zb.classList.add('hidden');
-    if (Math.abs(p.target - p.scale0) <= 0.01) return;
+    if (Math.abs(p.target - p.scale0) <= 0.01) { dropStage(); return; }
     S.pdfScale = p.target;
     layoutPdfPages();
-    requestAnimationFrame(() => {
-      const P = S.pageEls[p.page]; if (!P) return;
+    /* Scroll in the SAME step — waiting a frame let the browser paint the
+       new layout at the old scroll position once: that was the jhatka. */
+    const P = S.pageEls[p.page];
+    if (P) {
       const rb = $('#rBody'), w = P.wrap;
       rb.scrollLeft = w.offsetLeft + p.fx * w.offsetWidth - p.mx;
       rb.scrollTop = w.offsetTop + p.fy * w.offsetHeight - p.my;
       S.curPage = p.page; updatePageInfo();
-    });
+    }
+    dropStage();
   };
   host.addEventListener('pointerup', endPinch);
   host.addEventListener('pointercancel', endPinch);
